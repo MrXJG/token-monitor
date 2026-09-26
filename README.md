@@ -1,5 +1,9 @@
 # TokenMonitor
 
+macOS 菜单栏 Token 用量监控工具，支持 CBC 兼容中转站和知遥 API，并通过 `UsageProvider` 接口扩展其他站点。
+
+本项目采用 [MIT License](LICENSE)。
+
 macOS 14+ 菜单栏 Token 用量监控，支持 `cbc.icu` 和 `zyapi.tuluo.top:8888`。
 
 ## 当前能力
