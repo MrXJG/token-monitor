@@ -60,9 +60,10 @@ struct SettingsView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         if store.authMethod == .password {
-                            Text("账号").font(.caption).foregroundStyle(.secondary)
-                            TextField("账号", text: $store.username)
-                                .textContentType(.username)
+                            Text(store.providerID == "cbc-v2" ? "邮箱" : "账号")
+                                .font(.caption).foregroundStyle(.secondary)
+                            TextField(store.providerID == "cbc-v2" ? "邮箱" : "账号", text: $store.username)
+                                .textContentType(store.providerID == "cbc-v2" ? .emailAddress : .username)
                                 .focused($focusedField, equals: .username)
                         }
                         Text(store.authMethod == .apiKey ? "API Key" : "密码")

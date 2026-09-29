@@ -9,7 +9,10 @@ struct ProviderDefinition: Sendable {
 
 enum ProviderCatalog {
     static let all: [ProviderDefinition] = [
-        ProviderDefinition(id: "cbc", name: "CBC 兼容", defaultAddress: "https://cbc.icu") { address in
+        ProviderDefinition(id: "cbc-v2", name: "CBC 新版", defaultAddress: "https://cbc.icu") { address in
+            CBCGatewayProvider(baseURL: try CBCGatewayProvider.endpoint(for: address))
+        },
+        ProviderDefinition(id: "cbc", name: "CBC 旧版", defaultAddress: "https://cbc.icu") { address in
             CBCProvider(baseURL: try CBCProvider.endpoint(for: address))
         },
         ProviderDefinition(id: "zhiyao", name: "知遥 API", defaultAddress: "https://zyapi.tuluo.top:8888") { address in

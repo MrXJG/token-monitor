@@ -23,7 +23,7 @@ final class MonitorStore: ObservableObject {
     @Published var menuBarDisplay: MenuBarDisplay = .balance
     @Published var selectedTab = 0
     @Published var siteAddress = "https://cbc.icu"
-    @Published var providerID = "cbc"
+    @Published var providerID = "cbc-v2"
 
     @Published private(set) var provider: any UsageProvider
     private let credentials = CredentialVault(service: "com.tokenmonitor.credentials")
@@ -31,16 +31,18 @@ final class MonitorStore: ObservableObject {
     private var refreshRevision = 0
     private var sessionAccount: String { sessionAccount(for: provider) }
     private var apiKeyAccount: String { apiKeyAccount(for: provider) }
+    private var refreshAccount: String { refreshAccount(for: provider) }
     private func sessionAccount(for provider: any UsageProvider) -> String { "\(provider.manifest.id).session" }
     private func apiKeyAccount(for provider: any UsageProvider) -> String { "\(provider.manifest.id).apiKey" }
+    private func refreshAccount(for provider: any UsageProvider) -> String { "\(provider.manifest.id).refresh" }
 
     init(provider: (any UsageProvider)? = nil, loadSavedCredentials: Bool = true) {
-        let definition = ProviderCatalog.definition(for: UserDefaults.standard.string(forKey: "providerID") ?? "cbc")
+        let definition = ProviderCatalog.definition(for: UserDefaults.standard.string(forKey: "providerID") ?? "cbc-v2")
         let savedAddress = UserDefaults.standard.string(forKey: "siteAddress.\(definition.id)") ?? definition.defaultAddress
         let selectedProvider = try? definition.makeProvider(savedAddress)
         self.providerID = definition.id
         self.siteAddress = selectedProvider == nil ? definition.defaultAddress : savedAddress
-        self.provider = provider ?? selectedProvider ?? CBCProvider()
+        self.provider = provider ?? selectedProvider ?? CBCGatewayProvider()
         self.authMethod = AuthMethod(rawValue: UserDefaults.standard.string(forKey: "authMethod.\(self.provider.manifest.id)") ?? "")
             ?? self.provider.manifest.supportedAuthMethods.first ?? .apiKey
         let savedInterval = UserDefaults.standard.double(forKey: "refreshSeconds")
@@ -81,7 +83,9 @@ final class MonitorStore: ObservableObject {
                 sessionToken: newSession.token,
                 sessionAccount: sessionAccount(for: candidate),
                 apiKey: method == .apiKey ? submittedSecret : nil,
-                apiKeyAccount: apiKeyAccount(for: candidate)
+                apiKeyAccount: apiKeyAccount(for: candidate),
+                refreshToken: newSession.refreshToken,
+                refreshAccount: refreshAccount(for: candidate)
             )
             guard startingRevision == refreshRevision else { return }
             refreshRevision += 1
@@ -118,7 +122,9 @@ final class MonitorStore: ObservableObject {
         clearSnapshot()
         let currentSessionAccount = sessionAccount
         let currentAPIKeyAccount = apiKeyAccount
-        Task { await credentials.delete(sessionAccount: currentSessionAccount, apiKeyAccount: currentAPIKeyAccount) }
+        let currentRefreshAccount = refreshAccount
+        Task { await credentials.delete(sessionAccount: currentSessionAccount, apiKeyAccount: currentAPIKeyAccount,
+                                        refreshAccount: currentRefreshAccount) }
         loginStatus = "已退出登录"
     }
 
@@ -139,8 +145,23 @@ final class MonitorStore: ObservableObject {
             try await loadSnapshot(session: currentSession, provider: activeProvider, revision: revision)
         } catch ProviderError.unauthenticated {
             guard revision == refreshRevision else { return }
-            session = nil
-            guard let renewedSession = await restoreSession(provider: activeProvider, revision: revision) else { return }
+            var renewedSession: AuthSession
+            do {
+                renewedSession = try await activeProvider.renewSession(currentSession)
+                guard revision == refreshRevision else { return }
+                try await credentials.saveSession(renewedSession.token,
+                                                  account: sessionAccount(for: activeProvider),
+                                                  refreshToken: renewedSession.refreshToken,
+                                                  refreshAccount: refreshAccount(for: activeProvider))
+                session = renewedSession
+            } catch ProviderError.unauthenticated {
+                session = nil
+                guard let restored = await restoreSession(provider: activeProvider, revision: revision) else { return }
+                renewedSession = restored
+            } catch {
+                if revision == refreshRevision { lastError = error.localizedDescription }
+                return
+            }
             do {
                 try await loadSnapshot(session: renewedSession, provider: activeProvider, revision: revision)
             } catch {
@@ -180,7 +201,9 @@ final class MonitorStore: ObservableObject {
             }
             let newSession = try await provider.authenticate(.apiKey, secret: apiKey, username: nil)
             guard revision == refreshRevision else { return nil }
-            try await credentials.saveSession(newSession.token, account: sessionAccount(for: provider))
+            try await credentials.saveSession(newSession.token, account: sessionAccount(for: provider),
+                                              refreshToken: newSession.refreshToken,
+                                              refreshAccount: refreshAccount(for: provider))
             guard revision == refreshRevision else { return nil }
             session = newSession
             return newSession
@@ -194,9 +217,11 @@ final class MonitorStore: ObservableObject {
         let revision = refreshRevision
         do {
             if let token = try await credentials.read(account: sessionAccount), !token.isEmpty {
+                let refreshToken = try await credentials.read(account: refreshAccount)
                 guard revision == refreshRevision else { return }
-                let method = AuthMethod(rawValue: UserDefaults.standard.string(forKey: "authMethod.\(provider.manifest.id)") ?? "apiKey") ?? .apiKey
-                session = AuthSession(token: token, expiresAt: nil, method: method)
+                let method = AuthMethod(rawValue: UserDefaults.standard.string(forKey: "authMethod.\(provider.manifest.id)") ?? "")
+                    ?? provider.manifest.supportedAuthMethods.first ?? .apiKey
+                session = AuthSession(token: token, expiresAt: nil, method: method, refreshToken: refreshToken)
                 await refresh()
             } else if let apiKey = try await credentials.read(account: apiKeyAccount), !apiKey.isEmpty {
                 guard revision == refreshRevision else { return }

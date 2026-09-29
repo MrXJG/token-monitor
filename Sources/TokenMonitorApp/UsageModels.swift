@@ -44,6 +44,7 @@ struct AuthSession: Sendable {
     let token: String
     let expiresAt: Date?
     var method: AuthMethod = .apiKey
+    var refreshToken: String? = nil
 }
 
 struct UsageOverview: Sendable {
@@ -166,6 +167,7 @@ protocol UsageProvider: Sendable {
     var manifest: ProviderManifest { get }
     func capabilities(for session: AuthSession) -> ProviderCapabilities
     func authenticate(_ method: AuthMethod, secret: String, username: String?) async throws -> AuthSession
+    func renewSession(_ session: AuthSession) async throws -> AuthSession
     func fetchOverview(session: AuthSession) async throws -> UsageOverview
     func fetchTrend(session: AuthSession, days: Int) async throws -> [UsageBucket]
     func fetchRecentUsage(session: AuthSession, query: UsageQuery) async throws -> UsagePage
@@ -173,4 +175,5 @@ protocol UsageProvider: Sendable {
 
 extension UsageProvider {
     func capabilities(for session: AuthSession) -> ProviderCapabilities { manifest.capabilities }
+    func renewSession(_ session: AuthSession) async throws -> AuthSession { throw ProviderError.unauthenticated }
 }

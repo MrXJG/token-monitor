@@ -6,7 +6,7 @@ struct CBCProvider: UsageProvider {
     var manifest: ProviderManifest {
         ProviderManifest(
             id: baseURL.absoluteString == "https://cbc.icu/prod-api" ? "cbc" : "cbc:\(baseURL.absoluteString)",
-            name: baseURL.host == "cbc.icu" ? "CBC 中转站" : (baseURL.host ?? "中转站"),
+            name: baseURL.host == "cbc.icu" ? "CBC 旧版" : (baseURL.host ?? "中转站"),
             capabilities: [.balance, .usageTrend, .requestDetails, .cacheUsage, .modelBreakdown],
             supportedAuthMethods: [.apiKey, .password]
         )
@@ -141,6 +141,9 @@ struct CBCProvider: UsageProvider {
         guard let http = response as? HTTPURLResponse else { throw ProviderError.server("没有收到有效响应") }
         if http.statusCode == 401 { throw ProviderError.unauthenticated }
         guard (200..<300).contains(http.statusCode) else { throw ProviderError.server("服务器返回 HTTP \(http.statusCode)") }
+        if http.value(forHTTPHeaderField: "Content-Type")?.lowercased().contains("text/html") == true {
+            throw ProviderError.server("站点返回网页而非接口数据，请确认所选 CBC 接口版本")
+        }
         do {
             let status = try decoder.decode(ResponseStatus.self, from: data)
             if status.code == 401 { throw ProviderError.unauthenticated }

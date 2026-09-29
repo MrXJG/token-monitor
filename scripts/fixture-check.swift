@@ -68,6 +68,15 @@ enum FixtureCheck {
             throw CheckError.failed
         } catch ProviderError.unauthenticated {
         }
+        FixtureProtocol.overview = Data("<html>site moved</html>".utf8)
+        FixtureProtocol.cbcContentType = "text/html"
+        do {
+            _ = try await provider.fetchOverview(session: session)
+            throw CheckError.failed
+        } catch ProviderError.server(let message) {
+            guard message.contains("返回网页") else { throw CheckError.failed }
+        }
+        FixtureProtocol.cbcContentType = "application/json"
         let zhiyao = ZhiyaoProvider(session: URLSession(configuration: configuration))
         guard try ZhiyaoProvider.endpoint(for: "https://zyapi.tuluo.top:8888/dashboard/").absoluteString == "https://zyapi.tuluo.top:8888" else {
             throw CheckError.failed
@@ -138,6 +147,7 @@ private final class FixtureProtocol: URLProtocol {
     nonisolated(unsafe) static var zhiyaoUsage = Data()
     nonisolated(unsafe) static var zhiyaoTrend = Data()
     nonisolated(unsafe) static var zhiyaoKey = Data()
+    nonisolated(unsafe) static var cbcContentType = "application/json"
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -160,7 +170,8 @@ private final class FixtureProtocol: URLProtocol {
         } else {
             body = Self.overview
         }
-        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+        let contentType = request.url?.path.hasPrefix("/prod-api/") == true ? Self.cbcContentType : "application/json"
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": contentType])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)

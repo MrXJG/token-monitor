@@ -20,9 +20,12 @@ actor CredentialVault {
         try load()[account]
     }
 
-    func saveLogin(sessionToken: String, sessionAccount: String, apiKey: String?, apiKeyAccount: String) throws {
+    func saveLogin(sessionToken: String, sessionAccount: String, apiKey: String?, apiKeyAccount: String,
+                   refreshToken: String?, refreshAccount: String) throws {
         var values = try load()
         values[sessionAccount] = sessionToken
+        if let refreshToken, !refreshToken.isEmpty { values[refreshAccount] = refreshToken }
+        else { values.removeValue(forKey: refreshAccount) }
         if let apiKey, !apiKey.isEmpty {
             values[apiKeyAccount] = apiKey
         } else {
@@ -31,17 +34,19 @@ actor CredentialVault {
         try save(values)
     }
 
-    func saveSession(_ token: String, account: String) throws {
+    func saveSession(_ token: String, account: String, refreshToken: String?, refreshAccount: String) throws {
         var values = try load()
         values[account] = token
+        if let refreshToken, !refreshToken.isEmpty { values[refreshAccount] = refreshToken }
         try save(values)
     }
 
-    func delete(sessionAccount: String, apiKeyAccount: String) {
+    func delete(sessionAccount: String, apiKeyAccount: String, refreshAccount: String) {
         do {
             var values = try load()
             values.removeValue(forKey: sessionAccount)
             values.removeValue(forKey: apiKeyAccount)
+            values.removeValue(forKey: refreshAccount)
             try save(values)
         } catch {
             // Match the previous Keychain delete behavior: logout remains
