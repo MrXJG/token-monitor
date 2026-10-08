@@ -41,6 +41,17 @@ struct OverviewView: View {
                 .padding(.top, 12)
                 .padding(.bottom, 10)
             Divider()
+            if store.activeCapabilities.contains(.requestDetails) {
+                Picker("视图", selection: $store.selectedTab) {
+                    Text("概览").tag(0)
+                    Text("请求记录").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: MonitorLayout.panelWidth - (MonitorLayout.panelGutter * 2))
+                .padding(.horizontal, MonitorLayout.panelGutter)
+                .padding(.vertical, 10)
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: MonitorLayout.sectionGap) {
                     if let error = store.lastError {
@@ -52,15 +63,6 @@ struct OverviewView: View {
                             .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
                     }
                     if let data = store.overview {
-                        if store.activeCapabilities.contains(.requestDetails) {
-                            Picker("视图", selection: $store.selectedTab) {
-                                Text("概览").tag(0)
-                                Text("请求记录").tag(1)
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                            .frame(maxWidth: .infinity)
-                        }
                         if store.selectedTab == 0 || !store.activeCapabilities.contains(.requestDetails) {
                             overviewGrid(data)
                             if store.activeCapabilities.contains(.usageTrend), !store.trend.isEmpty {
@@ -99,45 +101,58 @@ struct OverviewView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
+        HStack(alignment: .center, spacing: 8) {
+            HStack(spacing: 8) {
                 Text(store.provider.manifest.name)
                     .font(.headline)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityLabel("当前站点：\(store.provider.manifest.name)")
-                HStack(spacing: 2) {
-                    providerSwitcher
-                    Button { Task { await store.refresh() } } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .frame(width: MonitorLayout.iconTarget, height: MonitorLayout.iconTarget)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(store.isRefreshing || store.session == nil)
-                    .help("刷新当前站点")
-                    .accessibilityLabel("刷新当前站点")
-                    Button(action: onSettings) {
-                        Image(systemName: "gearshape")
-                            .frame(width: MonitorLayout.iconTarget, height: MonitorLayout.iconTarget)
-                    }
-                    .buttonStyle(.plain)
-                    .help("设置")
-                    .accessibilityLabel("设置")
-                }
+                statusSummary
             }
-            HStack(spacing: 6) {
+            .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 2) {
+                providerSwitcher
+                Button { Task { await store.refresh() } } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .frame(width: MonitorLayout.iconTarget, height: MonitorLayout.iconTarget)
+                }
+                .buttonStyle(.plain)
+                .disabled(store.isRefreshing || store.session == nil)
+                .help("刷新当前站点")
+                .accessibilityLabel("刷新当前站点")
+                Button(action: onSettings) {
+                    Image(systemName: "gearshape")
+                        .frame(width: MonitorLayout.iconTarget, height: MonitorLayout.iconTarget)
+                }
+                .buttonStyle(.plain)
+                .help("设置")
+                .accessibilityLabel("设置")
+            }
+        }
+    }
+
+    private var statusSummary: some View {
+        HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 Circle()
                     .fill(store.lastError != nil ? Color.orange : (store.session == nil ? Color.secondary : MonitorPalette.balance))
                     .frame(width: 6, height: 6)
-                Text(store.isRefreshing ? "刷新中" : (store.lastError != nil ? (store.session == nil ? "连接异常" : "更新失败") : (store.session == nil ? "未连接" : "已连接")))
-                Spacer()
-                Text(store.lastUpdated.map { "更新于 \($0.formatted(date: .omitted, time: .shortened))" } ?? "尚未更新")
+                Text(connectionStatus)
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .accessibilityElement(children: .combine)
+            Text("·")
+                .foregroundStyle(.tertiary)
+            Text(store.lastUpdated.map { "更新于 \($0.formatted(date: .omitted, time: .shortened))" } ?? "尚未更新")
+                .lineLimit(1)
         }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var connectionStatus: String {
+        store.isRefreshing ? "刷新中" : (store.lastError != nil ? (store.session == nil ? "连接异常" : "更新失败") : (store.session == nil ? "未连接" : "已连接"))
     }
 
     private var providerSwitcher: some View {
