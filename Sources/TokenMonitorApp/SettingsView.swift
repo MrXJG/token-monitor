@@ -1,11 +1,17 @@
 import AppKit
 import SwiftUI
 
+// Disambiguate the property wrapper from the SDK's same-named State macro.
+private typealias ViewState<Value> = SwiftUI.State<Value>
+
 struct SettingsView: View {
     @ObservedObject var store: MonitorStore
     @FocusState private var focusedField: Field?
+    @ViewState private var customRefreshText = ""
+    @ViewState private var customRefreshError: String?
+    @ViewState private var usesCustomRefresh = false
 
-    private enum Field { case username, secret }
+    private enum Field { case username, secret, refreshInterval }
 
     private var isCurrentSite: Bool {
         guard let candidate = try? ProviderCatalog.definition(for: store.providerID).makeProvider(store.siteAddress) else { return false }
@@ -115,12 +121,38 @@ struct SettingsView: View {
                     Divider()
                     VStack(alignment: .leading, spacing: 10) {
                         Text("自动刷新").font(.headline)
-                        Picker("间隔", selection: Binding(get: { store.refreshSeconds }, set: { store.updateRefreshSeconds($0) })) {
-                            Text("30 秒").tag(30.0)
-                            Text("60 秒").tag(60.0)
-                            Text("5 分钟").tag(300.0)
+                        Picker("间隔", selection: refreshOption) {
+                            ForEach(RefreshPolicy.presets, id: \.self) { seconds in
+                                Text(RefreshPolicy.title(for: seconds)).tag(String(Int(seconds)))
+                            }
+                            Text("自定义").tag("custom")
                         }
-                        .pickerStyle(.segmented)
+                        .pickerStyle(.menu)
+                        if usesCustomRefresh {
+                            HStack(spacing: 8) {
+                                TextField("秒数", text: $customRefreshText)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 100)
+                                    .focused($focusedField, equals: .refreshInterval)
+                                    .accessibilityLabel("自定义刷新间隔，单位秒")
+                                    .onSubmit { applyCustomRefresh() }
+                                Text("秒")
+                                    .foregroundStyle(.secondary)
+                                Button("应用") { applyCustomRefresh() }
+                                    .buttonStyle(.bordered)
+                                Text("当前 \(Int(store.refreshSeconds)) 秒")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if let customRefreshError {
+                                Text(customRefreshError)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+                        }
+                        Text("建议不少于 15 秒，最短 5 秒；过于频繁可能触发站点限流。")
+                            .font(.caption)
+                            .foregroundStyle(store.refreshSeconds < RefreshPolicy.recommendedSeconds ? Color.orange : .secondary)
                         Button { Task { await store.refresh() } } label: {
                             Label("立即刷新", systemImage: "arrow.clockwise")
                         }
@@ -149,7 +181,11 @@ struct SettingsView: View {
         }
         .frame(width: MonitorLayout.settingsWidth, height: MonitorLayout.settingsHeight)
         .background(MonitorMaterial(material: .popover))
-        .onAppear { focusedField = .secret }
+        .onAppear {
+            focusedField = .secret
+            usesCustomRefresh = !RefreshPolicy.presets.contains(store.refreshSeconds)
+            customRefreshText = String(Int(store.refreshSeconds))
+        }
         .onDisappear { store.revealsSecret = false }
         .onChange(of: store.authMethod) { _, _ in
             store.secret = ""
@@ -159,5 +195,34 @@ struct SettingsView: View {
         .onChange(of: store.providerID) { _, _ in
             focusedField = store.authMethod == .password ? .username : .secret
         }
+    }
+
+    private var refreshOption: Binding<String> {
+        Binding(
+            get: {
+                usesCustomRefresh ? "custom" : String(Int(store.refreshSeconds))
+            },
+            set: { value in
+                if value == "custom" {
+                    usesCustomRefresh = true
+                    customRefreshText = String(Int(store.refreshSeconds))
+                    customRefreshError = nil
+                    focusedField = .refreshInterval
+                } else if let seconds = Double(value) {
+                    usesCustomRefresh = false
+                    store.updateRefreshSeconds(seconds)
+                    customRefreshError = nil
+                }
+            }
+        )
+    }
+
+    private func applyCustomRefresh() {
+        guard let seconds = RefreshPolicy.parse(customRefreshText) else {
+            customRefreshError = "请输入 5 到 86400 之间的整数秒数。"
+            return
+        }
+        store.updateRefreshSeconds(seconds)
+        customRefreshError = nil
     }
 }

@@ -19,7 +19,7 @@ final class MonitorStore: ObservableObject {
     @Published var username = ""
     @Published var secret = ""
     @Published var revealsSecret = false
-    @Published var refreshSeconds = 60.0
+    @Published var refreshSeconds = RefreshPolicy.defaultSeconds
     @Published var menuBarDisplay: MenuBarDisplay = .balance
     @Published var selectedTab = 0
     @Published var siteAddress = "https://cbc.icu"
@@ -27,7 +27,9 @@ final class MonitorStore: ObservableObject {
 
     @Published private(set) var provider: any UsageProvider
     private let credentials = CredentialVault(service: "com.tokenmonitor.credentials")
+    private let defaults: UserDefaults
     private var timer: Task<Void, Never>?
+    private var refreshBackoff = RefreshBackoff()
     private var refreshRevision = 0
     private var sessionAccount: String { sessionAccount(for: provider) }
     private var apiKeyAccount: String { apiKeyAccount(for: provider) }
@@ -36,18 +38,19 @@ final class MonitorStore: ObservableObject {
     private func apiKeyAccount(for provider: any UsageProvider) -> String { "\(provider.manifest.id).apiKey" }
     private func refreshAccount(for provider: any UsageProvider) -> String { "\(provider.manifest.id).refresh" }
 
-    init(provider: (any UsageProvider)? = nil, loadSavedCredentials: Bool = true) {
-        let definition = ProviderCatalog.definition(for: UserDefaults.standard.string(forKey: "providerID") ?? "cbc-v2")
-        let savedAddress = UserDefaults.standard.string(forKey: "siteAddress.\(definition.id)") ?? definition.defaultAddress
+    init(provider: (any UsageProvider)? = nil, loadSavedCredentials: Bool = true, defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let definition = ProviderCatalog.definition(for: defaults.string(forKey: "providerID") ?? "cbc-v2")
+        let savedAddress = defaults.string(forKey: "siteAddress.\(definition.id)") ?? definition.defaultAddress
         let selectedProvider = try? definition.makeProvider(savedAddress)
         self.providerID = definition.id
         self.siteAddress = selectedProvider == nil ? definition.defaultAddress : savedAddress
         self.provider = provider ?? selectedProvider ?? CBCGatewayProvider()
-        self.authMethod = AuthMethod(rawValue: UserDefaults.standard.string(forKey: "authMethod.\(self.provider.manifest.id)") ?? "")
+        self.authMethod = AuthMethod(rawValue: defaults.string(forKey: "authMethod.\(self.provider.manifest.id)") ?? "")
             ?? self.provider.manifest.supportedAuthMethods.first ?? .apiKey
-        let savedInterval = UserDefaults.standard.double(forKey: "refreshSeconds")
-        if [30.0, 60.0, 300.0].contains(savedInterval) { refreshSeconds = savedInterval }
-        if let savedDisplay = UserDefaults.standard.string(forKey: "menuBarDisplay"),
+        let savedInterval = defaults.double(forKey: "refreshSeconds")
+        if RefreshPolicy.isValid(savedInterval) { refreshSeconds = savedInterval }
+        if let savedDisplay = defaults.string(forKey: "menuBarDisplay"),
            let display = MenuBarDisplay(rawValue: savedDisplay) { menuBarDisplay = display }
         if loadSavedCredentials {
             startAutoRefresh()
@@ -96,9 +99,9 @@ final class MonitorStore: ObservableObject {
             selectedTab = 0
             secret = ""
             siteAddress = submittedAddress
-            UserDefaults.standard.set(selectedID, forKey: "providerID")
-            UserDefaults.standard.set(submittedAddress, forKey: "siteAddress.\(selectedID)")
-            UserDefaults.standard.set(method.rawValue, forKey: "authMethod.\(candidate.manifest.id)")
+            defaults.set(selectedID, forKey: "providerID")
+            defaults.set(submittedAddress, forKey: "siteAddress.\(selectedID)")
+            defaults.set(method.rawValue, forKey: "authMethod.\(candidate.manifest.id)")
             loginStatus = "登录成功，正在同步数据"
             let loginRevision = refreshRevision
             await refresh()
@@ -130,6 +133,11 @@ final class MonitorStore: ObservableObject {
 
     func refresh() async {
         guard !isRefreshing else { return }
+        if refreshBackoff.remaining() > 0 {
+            let seconds = ceil(refreshBackoff.remaining()).formatted(.number.precision(.fractionLength(0)))
+            lastError = "请求过于频繁，已暂停刷新，请等待 \(seconds) 秒"
+            return
+        }
         let revision = refreshRevision
         let activeProvider = provider
         isRefreshing = true
@@ -159,16 +167,16 @@ final class MonitorStore: ObservableObject {
                 guard let restored = await restoreSession(provider: activeProvider, revision: revision) else { return }
                 renewedSession = restored
             } catch {
-                if revision == refreshRevision { lastError = error.localizedDescription }
+                handleRefreshError(error, revision: revision)
                 return
             }
             do {
                 try await loadSnapshot(session: renewedSession, provider: activeProvider, revision: revision)
             } catch {
-                if revision == refreshRevision { lastError = error.localizedDescription }
+                handleRefreshError(error, revision: revision)
             }
         } catch {
-            if revision == refreshRevision { lastError = error.localizedDescription }
+            handleRefreshError(error, revision: revision)
         }
     }
 
@@ -191,6 +199,7 @@ final class MonitorStore: ObservableObject {
         modelUsage = models
         lastUpdated = Date()
         lastError = nil
+        refreshBackoff.reset()
     }
 
     private func restoreSession(provider: any UsageProvider, revision: Int) async -> AuthSession? {
@@ -208,7 +217,7 @@ final class MonitorStore: ObservableObject {
             session = newSession
             return newSession
         } catch {
-            if revision == refreshRevision { lastError = error.localizedDescription }
+            handleRefreshError(error, revision: revision)
             return nil
         }
     }
@@ -219,7 +228,7 @@ final class MonitorStore: ObservableObject {
             if let token = try await credentials.read(account: sessionAccount), !token.isEmpty {
                 let refreshToken = try await credentials.read(account: refreshAccount)
                 guard revision == refreshRevision else { return }
-                let method = AuthMethod(rawValue: UserDefaults.standard.string(forKey: "authMethod.\(provider.manifest.id)") ?? "")
+                let method = AuthMethod(rawValue: defaults.string(forKey: "authMethod.\(provider.manifest.id)") ?? "")
                     ?? provider.manifest.supportedAuthMethods.first ?? .apiKey
                 session = AuthSession(token: token, expiresAt: nil, method: method, refreshToken: refreshToken)
                 await refresh()
@@ -240,18 +249,31 @@ final class MonitorStore: ObservableObject {
         modelUsage = []
         lastUpdated = nil
         lastError = nil
+        refreshBackoff.reset()
     }
 
     func updateRefreshSeconds(_ value: Double) {
+        guard RefreshPolicy.isValid(value) else { return }
         refreshSeconds = value
-        UserDefaults.standard.set(value, forKey: "refreshSeconds")
+        defaults.set(value, forKey: "refreshSeconds")
         startAutoRefresh()
+    }
+
+    private func handleRefreshError(_ error: Error, revision: Int) {
+        guard revision == refreshRevision, !(error is CancellationError) else { return }
+        if case ProviderError.rateLimited(let retryAfter) = error {
+            let delay = refreshBackoff.register(retryAfter: retryAfter, interval: refreshSeconds)
+            let seconds = ceil(delay).formatted(.number.precision(.fractionLength(0)))
+            lastError = "请求过于频繁，已暂停刷新约 \(seconds) 秒"
+        } else {
+            lastError = error.localizedDescription
+        }
     }
 
     func updateProviderID(_ value: String) {
         guard value != providerID else { return }
         let definition = ProviderCatalog.definition(for: value)
-        let address = UserDefaults.standard.string(forKey: "siteAddress.\(value)") ?? definition.defaultAddress
+        let address = defaults.string(forKey: "siteAddress.\(value)") ?? definition.defaultAddress
         guard let candidate = try? definition.makeProvider(address) else { return }
         refreshRevision += 1
         isRefreshing = false
@@ -261,20 +283,20 @@ final class MonitorStore: ObservableObject {
         session = nil
         selectedTab = 0
         clearSnapshot()
-        authMethod = AuthMethod(rawValue: UserDefaults.standard.string(forKey: "authMethod.\(candidate.manifest.id)") ?? "")
+        authMethod = AuthMethod(rawValue: defaults.string(forKey: "authMethod.\(candidate.manifest.id)") ?? "")
             ?? candidate.manifest.supportedAuthMethods.first ?? .apiKey
         username = ""
         secret = ""
         revealsSecret = false
         loginStatus = nil
         lastError = nil
-        UserDefaults.standard.set(value, forKey: "providerID")
+        defaults.set(value, forKey: "providerID")
         Task { await loadSavedCredentials() }
     }
 
     func updateMenuBarDisplay(_ value: MenuBarDisplay) {
         menuBarDisplay = value
-        UserDefaults.standard.set(value.rawValue, forKey: "menuBarDisplay")
+        defaults.set(value.rawValue, forKey: "menuBarDisplay")
     }
 
     private func fetchTodayRecords(session: AuthSession, provider: any UsageProvider) async throws -> [UsageRecord] {
@@ -302,11 +324,17 @@ final class MonitorStore: ObservableObject {
         timer?.cancel()
         timer = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(self?.refreshSeconds ?? 60))
+                let delay = self?.nextRefreshDelay() ?? RefreshPolicy.defaultSeconds
+                try? await Task.sleep(for: .seconds(delay))
                 guard !Task.isCancelled else { return }
-                await self?.refresh()
+                // Changing the interval cancels only the timer, not an in-flight request.
+                Task { [weak self] in await self?.refresh() }
             }
         }
+    }
+
+    private func nextRefreshDelay() -> TimeInterval {
+        max(refreshSeconds, refreshBackoff.remaining())
     }
 
     deinit { timer?.cancel() }

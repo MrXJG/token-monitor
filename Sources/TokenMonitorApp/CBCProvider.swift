@@ -139,6 +139,7 @@ struct CBCProvider: UsageProvider {
         }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw ProviderError.server("没有收到有效响应") }
+        if http.statusCode == 429 { throw ProviderError.rateLimited(retryAfter: http.retryAfterSeconds()) }
         if http.statusCode == 401 { throw ProviderError.unauthenticated }
         guard (200..<300).contains(http.statusCode) else { throw ProviderError.server("服务器返回 HTTP \(http.statusCode)") }
         if http.value(forHTTPHeaderField: "Content-Type")?.lowercased().contains("text/html") == true {
@@ -147,6 +148,7 @@ struct CBCProvider: UsageProvider {
         do {
             let status = try decoder.decode(ResponseStatus.self, from: data)
             if status.code == 401 { throw ProviderError.unauthenticated }
+            if status.code == 429 { throw ProviderError.rateLimited(retryAfter: http.retryAfterSeconds()) }
             if let code = status.code, code != 200 {
                 throw ProviderError.server(status.msg ?? "服务器返回错误 \(code)")
             }

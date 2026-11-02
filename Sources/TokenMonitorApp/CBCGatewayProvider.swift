@@ -176,6 +176,7 @@ struct CBCGatewayProvider: UsageProvider {
         }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw ProviderError.server("没有收到有效响应") }
+        if http.statusCode == 429 { throw ProviderError.rateLimited(retryAfter: http.retryAfterSeconds()) }
         if http.statusCode == 401 { throw ProviderError.unauthenticated }
         if http.value(forHTTPHeaderField: "Content-Type")?.lowercased().contains("text/html") == true {
             throw ProviderError.server("站点返回网页而非接口数据，请确认所选 CBC 接口版本")
@@ -188,6 +189,7 @@ struct CBCGatewayProvider: UsageProvider {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         do {
             let envelope = try decoder.decode(GatewayEnvelope<T>.self, from: data)
+            if envelope.code == 429 { throw ProviderError.rateLimited(retryAfter: http.retryAfterSeconds()) }
             guard envelope.code == 0 else { throw ProviderError.server(envelope.message ?? "服务器返回错误 \(envelope.code)") }
             guard let payload = envelope.data else { throw ProviderError.decoding("接口未返回数据") }
             return payload

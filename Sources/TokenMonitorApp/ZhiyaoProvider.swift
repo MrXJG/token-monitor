@@ -171,6 +171,7 @@ struct ZhiyaoProvider: UsageProvider {
         }
         let (data, response) = try await self.session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw ProviderError.server("没有收到有效响应") }
+        if http.statusCode == 429 { throw ProviderError.rateLimited(retryAfter: http.retryAfterSeconds()) }
         if http.statusCode == 401 || http.statusCode == 403 { throw ProviderError.unauthenticated }
         guard (200..<300).contains(http.statusCode) else {
             let detail = (try? JSONDecoder().decode(ErrorResponse.self, from: data))?.detail

@@ -148,6 +148,7 @@ struct UsagePage: Sendable {
 enum ProviderError: LocalizedError, Sendable {
     case invalidURL
     case unauthenticated
+    case rateLimited(retryAfter: TimeInterval?)
     case server(String)
     case decoding(String)
     case unsupported(String)
@@ -156,10 +157,24 @@ enum ProviderError: LocalizedError, Sendable {
         switch self {
         case .invalidURL: return "服务地址无效"
         case .unauthenticated: return "认证已失效，请重新登录"
+        case .rateLimited: return "请求过于频繁，请稍后重试"
         case .server(let message): return message
         case .decoding(let message): return "接口数据格式异常：\(message)"
         case .unsupported(let message): return message
         }
+    }
+}
+
+extension HTTPURLResponse {
+    func retryAfterSeconds(now: Date = Date()) -> TimeInterval? {
+        guard let value = value(forHTTPHeaderField: "Retry-After")?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        if let seconds = Double(value), seconds.isFinite, seconds >= 0 { return seconds }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
+        guard let date = formatter.date(from: value) else { return nil }
+        return max(0, date.timeIntervalSince(now))
     }
 }
 

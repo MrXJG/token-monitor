@@ -29,8 +29,13 @@ struct RenderPreviews {
         try render(OverviewView(store: empty, onSettings: {}, onProviderSwitch: {}), named: "overview-empty", scheme: .light, in: directory)
 
         full.authMethod = .password
+        full.refreshSeconds = 60
         try render(SettingsView(store: full), named: "settings-password", scheme: .light, in: directory)
         try render(SettingsView(store: full), named: "settings-dark", scheme: .dark, in: directory)
+        full.refreshSeconds = 7
+        try render(SettingsView(store: full), named: "settings-refresh-custom", scheme: .light, in: directory)
+        try render(SettingsView(store: full), named: "settings-refresh-custom-dark", scheme: .dark, in: directory)
+        full.refreshSeconds = 60
         full.loginStatus = "登录成功，数据已更新"
         try render(SettingsView(store: full), named: "settings-success", scheme: .light, in: directory)
         full.loginStatus = nil
