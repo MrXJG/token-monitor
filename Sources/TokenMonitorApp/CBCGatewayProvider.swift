@@ -10,7 +10,7 @@ struct CBCGatewayProvider: UsageProvider {
         ProviderManifest(
             id: baseURL.absoluteString == "https://cbc.icu" ? "cbc-v2" : "cbc-v2:\(baseURL.absoluteString)",
             name: baseURL.host == "cbc.icu" ? "CBC 新版" : (baseURL.host ?? "中转站"),
-            capabilities: [.balance, .usageTrend, .requestDetails, .cacheUsage, .modelBreakdown],
+            capabilities: [.balance, .usageTrend, .requestDetails, .cacheUsage, .modelBreakdown, .groupRates],
             supportedAuthMethods: [.password]
         )
     }
@@ -78,7 +78,8 @@ struct CBCGatewayProvider: UsageProvider {
             cacheWriteTokens: usage.totalCacheCreationTokens, reasoningTokens: 0,
             cost: usage.totalActualCost, todayCost: usage.todayActualCost,
             averageFirstTokenTimeMs: nil, averageResponseTimeMs: usage.averageDurationMs,
-            apiKeyCount: usage.totalApiKeys ?? 0, updatedAt: Date(), cacheReadIncludedInInput: false
+            apiKeyCount: usage.totalApiKeys ?? 0, updatedAt: Date(), cacheReadIncludedInInput: false,
+            billingAccountID: account.id.map(String.init)
         )
     }
 
@@ -112,6 +113,23 @@ struct CBCGatewayProvider: UsageProvider {
         }
     }
 
+    func fetchGroupRates(session: AuthSession) async throws -> [GroupRate] {
+        async let available: [GatewayRateGroup] = request(path: "/groups/available", token: session.token)
+        async let overrides: [String: Decimal] = request(path: "/groups/rates", token: session.token)
+        let (groups, accountRates) = try await (available, overrides)
+        return try groups.filter { $0.status == nil || $0.status == "active" }.map { group in
+            let custom = accountRates[String(group.id)]
+            guard let rate = custom ?? group.rateMultiplier, rate >= 0 else {
+                throw ProviderError.decoding("分组倍率缺失或无效")
+            }
+            let peak = group.peakRateEnabled == true
+                ? "高峰 \(group.peakStart ?? "?") 至 \(group.peakEnd ?? "?")：\(group.peakRateMultiplier.map(GroupRate.format) ?? "未提供")"
+                : nil
+            return GroupRate(id: String(group.id), name: group.name, multiplier: rate,
+                             usesAccountRate: custom != nil, peakDescription: peak)
+        }
+    }
+
     func fetchRecentUsage(session: AuthSession, query: UsageQuery) async throws -> UsagePage {
         let result: GatewayUsagePage = try await request(
             path: "/usage", token: session.token,
@@ -136,23 +154,26 @@ struct CBCGatewayProvider: UsageProvider {
                 reasoningEffort: item.reasoningEffort, groupName: item.group?.name ?? item.groupName,
                 isStream: item.stream, durationMs: item.durationMs,
                 timeToFirstTokenMs: item.firstTokenMs, upstreamFirstEventMs: nil,
-                cacheReadIncludedInInput: false
+                cacheReadIncludedInInput: false, groupID: (item.groupId ?? item.group?.id).map(String.init)
             )
         }
         return UsagePage(records: records, total: result.total)
     }
 
-    private static func date(_ value: String) -> Date? {
-        let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = iso.date(from: value) { return date }
-        iso.formatOptions = [.withInternetDateTime]
-        if let date = iso.date(from: value) { return date }
+    private static let fractionalISO8601Style = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    private static let standardISO8601Style = Date.ISO8601FormatStyle()
+    private static let fallbackDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        return formatter.date(from: value)
+        return formatter
+    }()
+
+    private static func date(_ value: String) -> Date? {
+        if let date = try? fractionalISO8601Style.parse(value) { return date }
+        if let date = try? standardISO8601Style.parse(value) { return date }
+        return fallbackDateFormatter.date(from: value)
     }
 
     private func request<T: Decodable>(path: String, method: String = "GET", token: String?,
@@ -176,6 +197,7 @@ struct CBCGatewayProvider: UsageProvider {
         }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw ProviderError.server("没有收到有效响应") }
+        if http.statusCode == 429 { throw ProviderError.rateLimited(retryAfter: http.retryAfterSeconds()) }
         if http.statusCode == 401 { throw ProviderError.unauthenticated }
         if http.value(forHTTPHeaderField: "Content-Type")?.lowercased().contains("text/html") == true {
             throw ProviderError.server("站点返回网页而非接口数据，请确认所选 CBC 接口版本")
@@ -188,6 +210,7 @@ struct CBCGatewayProvider: UsageProvider {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         do {
             let envelope = try decoder.decode(GatewayEnvelope<T>.self, from: data)
+            if envelope.code == 429 { throw ProviderError.rateLimited(retryAfter: http.retryAfterSeconds()) }
             guard envelope.code == 0 else { throw ProviderError.server(envelope.message ?? "服务器返回错误 \(envelope.code)") }
             guard let payload = envelope.data else { throw ProviderError.decoding("接口未返回数据") }
             return payload
@@ -211,7 +234,17 @@ private struct GatewayLogin: Decodable {
     let expiresIn: Int?
     let requires2Fa: Bool?
 }
-private struct GatewayUser: Decodable { let balance: Decimal?; let frozenBalance: Decimal? }
+private struct GatewayUser: Decodable { let id: Int?; let balance: Decimal?; let frozenBalance: Decimal? }
+private struct GatewayRateGroup: Decodable {
+    let id: Int
+    let name: String
+    let status: String?
+    let rateMultiplier: Decimal?
+    let peakRateEnabled: Bool?
+    let peakStart: String?
+    let peakEnd: String?
+    let peakRateMultiplier: Decimal?
+}
 private struct GatewayStats: Decodable {
     let totalRequests: Int?
     let todayRequests: Int?
@@ -256,13 +289,14 @@ private struct GatewayUsageItem: Decodable {
     let inboundEndpoint: String?
     let reasoningEffort: String?
     let groupName: String?
+    let groupId: Int?
     let group: GatewayGroup?
     let stream: Bool?
     let durationMs: Int?
     let firstTokenMs: Int?
 }
 private struct GatewayAPIKey: Decodable { let name: String? }
-private struct GatewayGroup: Decodable { let name: String? }
+private struct GatewayGroup: Decodable { let id: Int?; let name: String? }
 private enum GatewayID: Decodable, CustomStringConvertible {
     case number(Int), string(String)
     init(from decoder: Decoder) throws {

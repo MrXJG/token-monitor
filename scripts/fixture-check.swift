@@ -12,9 +12,13 @@ enum FixtureCheck {
         let trendJSON = Data("""
         {"code":200,"data":[{"date":"2026-09-24","requestCount":272,"totalTokens":17620472,"cost":null}]}
         """.utf8)
+        let groupsJSON = Data("""
+        {"code":200,"data":[{"groupId":7,"groupName":"ultra","groupCode":"ultra","description":"fixture","ratio":0.25,"status":"0"},{"groupId":8,"groupName":"inactive","groupCode":"inactive","ratio":0.5,"status":"1"}]}
+        """.utf8)
         FixtureProtocol.overview = overviewJSON
         FixtureProtocol.usage = usageJSON
         FixtureProtocol.trend = trendJSON
+        FixtureProtocol.groups = groupsJSON
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [FixtureProtocol.self]
         let provider = CBCProvider(session: URLSession(configuration: configuration))
@@ -22,11 +26,12 @@ enum FixtureCheck {
         let overview = try await provider.fetchOverview(session: session)
         let page = try await provider.fetchRecentUsage(session: session, query: UsageQuery())
         let trend = try await provider.fetchTrend(session: session, days: 7)
+        let groups = try await provider.fetchGroupRates(session: session)
         guard overview.totalTokens == 1_365_542_300,
               overview.todayRequests == 273,
               overview.frozenBalance == Decimal(string: "0.2"),
               trend.first?.totalTokens == 17_620_472,
-              page.records.first?.id == "360001",
+              page.records.first?.id == "cbc-360001",
               page.records.first?.requestId == "sample",
               page.records.first?.keyName == "primary",
               page.records.first?.totalTokens == 144_007,
@@ -34,7 +39,31 @@ enum FixtureCheck {
               page.records.first?.cacheWriteTokens == 12 else {
             throw CheckError.failed
         }
+        guard groups.count == 1,
+              groups.first?.id == "7",
+              groups.first?.name == "ultra",
+              groups.first?.multiplier == Decimal(string: "0.25") else { throw CheckError.failed }
+        FixtureProtocol.usage = Data("""
+        {"code":200,"total":2,"rows":[
+          {"requestTime":"2026-09-24 11:52:49","modelName":"gpt-6-sol","promptTokens":100,"completionTokens":20,"cacheReadTokens":40,"cost":0.1,"statusCode":200,"fail":"0","groupId":7,"groupName":"ultra","groupRatio":0.25},
+          {"requestTime":"2026-09-24 11:53:49","modelName":"gpt-6-sol","promptTokens":100,"completionTokens":20,"cacheReadTokens":40,"cost":0.1,"statusCode":null,"fail":"1","groupId":7,"groupName":"ultra","groupRatio":0.25}
+        ]}
+        """.utf8)
+        let currentContract = try await provider.fetchRecentUsage(session: session, query: UsageQuery())
+        guard currentContract.records[0].status == "成功",
+              currentContract.records[1].status == "失败",
+              currentContract.records[0].groupID == "7",
+              currentContract.records[0].groupMultiplier == Decimal(string: "0.25"),
+              currentContract.records[0].id.hasPrefix("cbc-") else { throw CheckError.failed }
+        let stableAgain = try await provider.fetchRecentUsage(session: session, query: UsageQuery()).records
+        guard stableAgain.map(\.id) == currentContract.records.map(\.id) else { throw CheckError.failed }
         let successful = page.records
+        for time in ["2026-09-24T11:52:49.123+08:00", "2026-09-24T03:52:49Z", "2026-09-24 11:52:49", "2026-09-24"] {
+            FixtureProtocol.usage = Data("{\"code\":200,\"total\":1,\"rows\":[{\"logId\":1,\"requestTime\":\"\(time)\"}]}".utf8)
+            guard try await provider.fetchRecentUsage(session: session, query: UsageQuery()).records.first?.requestTime != nil else {
+                throw CheckError.failed
+            }
+        }
         let (daily, models) = UsageAggregator.today(overview: overview, records: successful)
         guard daily.inputTokens == 143_624,
               daily.outputTokens == 383,
@@ -78,7 +107,9 @@ enum FixtureCheck {
         }
         FixtureProtocol.cbcContentType = "application/json"
         let zhiyao = ZhiyaoProvider(session: URLSession(configuration: configuration))
-        guard try ZhiyaoProvider.endpoint(for: "https://zyapi.tuluo.top:8888/dashboard/").absoluteString == "https://zyapi.tuluo.top:8888" else {
+        guard try ZhiyaoProvider.endpoint(for: "https://zyapi.tuluo.top:8888/dashboard/").absoluteString == "https://zyapi.tuluo.top:8888",
+              try ZhiyaoProvider.endpoint(for: "https://zhiyaoapi.top/dashboard/").absoluteString == "https://zhiyaoapi.top",
+              ZhiyaoProvider(baseURL: URL(string: "https://zhiyaoapi.top")!, session: URLSession(configuration: configuration)).manifest.id == "zhiyao" else {
             throw CheckError.failed
         }
         FixtureProtocol.zhiyaoLogin = Data(#"{"access_token":"sample-session"}"#.utf8)
@@ -86,7 +117,7 @@ enum FixtureCheck {
         {"available_balance":31.5,"fixed_balance":32,"fixed_balance_reserved":0.5,"today_total_cost":1.25,"total_requests":90,"today_requests":3,"total_input_tokens":100,"total_output_tokens":20,"total_cached_tokens":45,"total_cache_read_input_tokens":40,"total_cache_write_input_tokens":5,"api_key_count":2}
         """.utf8)
         FixtureProtocol.zhiyaoUsage = Data("""
-        {"total":1,"items":[{"id":42,"request_time":"2026-09-24T01:39:18.562645+08:00","display_model":"gpt-6-sol","input_tokens":100,"output_tokens":20,"cached_tokens":40,"cache_read_input_tokens":40,"cache_write_input_tokens":5,"cost_usd":0.1,"status_code":200,"api_key_name":"sample","is_stream":true,"latency_ms":1200}]}
+        {"total":1,"items":[{"id":42,"request_time":"2026-09-24T01:39:18.562645+08:00","display_model":"gpt-6-sol","input_tokens":100,"output_tokens":20,"cached_tokens":40,"cache_read_input_tokens":40,"cache_write_input_tokens":5,"cost_usd":0.1,"status_code":200,"api_key_name":"sample","is_stream":true,"latency_ms":1200,"catalog_group":"codex","channel_id":"gpt_pro","channel_name":"pro","channel_multiplier":2.0}]}
         """.utf8)
         FixtureProtocol.zhiyaoTrend = Data("""
         {"summary":{"range":"7d","total_cost":1.25,"total_requests":3},"data":[{"time":"2026-09-24","label":"09-24","request_count":3,"cost_usd":1.25}]}
@@ -94,16 +125,27 @@ enum FixtureCheck {
         FixtureProtocol.zhiyaoKey = Data("""
         {"success":true,"balanceScope":"user","data":[{"planName":"sample","isValid":true,"remaining":31.5,"unit":"USD"}],"keyUsage":{"todayCostUsd":0.75}}
         """.utf8)
+        FixtureProtocol.zhiyaoGroups = Data("""
+        {"items":[{"catalog_group":"codex","display_name":"Codex","channels":[{"channel_id":"gpt_pro","display_name":"pro","multiplier":2.0},{"channel_id":"gpt_plus","display_name":"plus","multiplier":1.5}]}]}
+        """.utf8)
         let passwordSession = try await zhiyao.authenticate(.password, secret: "fixture-password", username: "fixture-user")
         let user = try await zhiyao.fetchOverview(session: passwordSession)
         let zhiyaoPage = try await zhiyao.fetchRecentUsage(session: passwordSession, query: UsageQuery())
         let spending = try await zhiyao.fetchTrend(session: passwordSession, days: 7)
+        let zhiyaoRates = try await zhiyao.fetchGroupRates(session: passwordSession)
         guard passwordSession.method == .password,
               user.availableBalance == Decimal(string: "31.5"), user.totalTokens == 165,
               user.todayCost == Decimal(string: "1.25"),
               zhiyaoPage.records.first?.requestTime != nil,
               zhiyaoPage.records.first?.totalTokens == 165,
               zhiyaoPage.records.first?.cacheHitRate == Double(40) / Double(145),
+              zhiyaoPage.records.first?.groupID == "gpt_pro",
+              zhiyaoPage.records.first?.groupName == "codex · pro",
+              zhiyaoPage.records.first?.groupMultiplier == Decimal(string: "2.0"),
+              zhiyaoRates.count == 2,
+              zhiyaoRates[0].id == "gpt_pro",
+              zhiyaoRates[0].name == "Codex · pro",
+              zhiyaoRates[0].multiplier == Decimal(string: "2.0"),
               spending.first?.cost == Decimal(string: "1.25") else { throw CheckError.failed }
         let (dailyZhiyao, _) = UsageAggregator.today(overview: user, records: zhiyaoPage.records)
         guard dailyZhiyao.todayCost == Decimal(string: "1.25") else { throw CheckError.failed }
@@ -142,11 +184,13 @@ private final class FixtureProtocol: URLProtocol {
     nonisolated(unsafe) static var overview = Data()
     nonisolated(unsafe) static var usage = Data()
     nonisolated(unsafe) static var trend = Data()
+    nonisolated(unsafe) static var groups = Data()
     nonisolated(unsafe) static var zhiyaoLogin = Data()
     nonisolated(unsafe) static var zhiyaoUser = Data()
     nonisolated(unsafe) static var zhiyaoUsage = Data()
     nonisolated(unsafe) static var zhiyaoTrend = Data()
     nonisolated(unsafe) static var zhiyaoKey = Data()
+    nonisolated(unsafe) static var zhiyaoGroups = Data()
     nonisolated(unsafe) static var cbcContentType = "application/json"
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -163,10 +207,14 @@ private final class FixtureProtocol: URLProtocol {
             body = Self.zhiyaoTrend
         } else if request.url?.path == "/api/cc-switch/v1/usage" {
             body = Self.zhiyaoKey
+        } else if request.url?.path == "/public/groups" {
+            body = Self.zhiyaoGroups
         } else if request.url?.path.contains("usage-list") == true {
             body = Self.usage
         } else if request.url?.path.contains("trend") == true {
             body = Self.trend
+        } else if request.url?.path.contains("group/available") == true {
+            body = Self.groups
         } else {
             body = Self.overview
         }

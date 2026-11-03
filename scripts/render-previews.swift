@@ -7,13 +7,35 @@ struct RenderPreviews {
     static func main() throws {
         NSApplication.shared.setActivationPolicy(.prohibited)
         let directory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let full = sampleStore(provider: CBCProvider(), method: .password)
+        let groups = sampleStore(provider: CBCGatewayProvider(), method: .password)
+        groups.groupRates = [GroupRate(id: "7", name: "ultra", multiplier: Decimal(string: "0.25")!), GroupRate(id: "8", name: "ds", multiplier: Decimal(string: "0.75")!)]
+        groups.recentRecords[0].groupID = "7"
+        groups.groupRatesUpdated = Date()
+        try render(OverviewView(store: groups, onSettings: {}, onProviderSwitch: {}), named: "groups-overview-light", scheme: .light, in: directory)
+        try render(OverviewView(store: groups, onSettings: {}, onProviderSwitch: {}), named: "groups-overview-dark", scheme: .dark, in: directory)
+        groups.rateChanges = [GroupRateChange(id: UUID(), groupName: "ultra", previous: Decimal(string: "0.2")!, current: Decimal(string: "0.25")!, detectedAt: Date())]
+        groups.hasUnreadRateChange = true
+        try render(OverviewView(store: groups, onSettings: {}, onProviderSwitch: {}), named: "groups-changed", scheme: .light, in: directory)
+        try render(GroupRatesView(store: groups).frame(height: 440).background(MonitorMaterial(material: .popover)), named: "groups-detail", scheme: .light, in: directory, width: 362, height: 472)
+        groups.groupRatesError = "请求超时，保留上次倍率"
+        try render(OverviewView(store: groups, onSettings: {}, onProviderSwitch: {}), named: "groups-stale", scheme: .light, in: directory)
         try render(OverviewView(store: full, onSettings: {}, onProviderSwitch: {}), named: "overview-light", scheme: .light, in: directory)
         try render(OverviewView(store: full, onSettings: {}, onProviderSwitch: {}), named: "overview-dark", scheme: .dark, in: directory)
         full.selectedTab = 1
-        try render(OverviewView(store: full, onSettings: {}, onProviderSwitch: {}), named: "requests-light", scheme: .light, in: directory)
+        try render(OverviewView(store: full, onSettings: {}, onProviderSwitch: {}), named: "requests-light", scheme: .light, in: directory, height: full.panelHeight)
+        try render(OverviewView(store: full, onSettings: {}, onProviderSwitch: {}), named: "requests-dark", scheme: .dark, in: directory, height: full.panelHeight)
+        try render(ScrollView { RequestRecordsView(store: full, selectedID: "1").padding(18) }.frame(width: MonitorLayout.panelWidth, height: MonitorLayout.panelHeight).background(MonitorMaterial(material: .popover)), named: "request-detail", scheme: .light, in: directory)
+        try render(TrendStripView(buckets: full.trend, selectedID: "day-4").padding(18).background(Color(nsColor: .windowBackgroundColor)), named: "trend-selected", scheme: .light, in: directory)
+        try render(TrendStripView(buckets: full.trend, selectedID: "day-4").padding(18).background(Color(nsColor: .windowBackgroundColor)), named: "trend-selected-dark", scheme: .dark, in: directory)
+        full.recordsError = "记录接口暂时不可用"
+        full.lastError = "请求记录更新失败；概览已更新"
+        full.recoveryHint = "可重试请求记录，失败时保留上次数据。"
+        try render(OverviewView(store: full, onSettings: {}, onProviderSwitch: {}), named: "partial-error", scheme: .light, in: directory)
+        full.recordsError = nil; full.lastError = nil; full.recoveryHint = nil
         full.recentRecords = []
-        try render(OverviewView(store: full, onSettings: {}, onProviderSwitch: {}), named: "requests-empty", scheme: .light, in: directory)
+        try render(OverviewView(store: full, onSettings: {}, onProviderSwitch: {}), named: "requests-empty", scheme: .light, in: directory, height: full.panelHeight)
 
         let key = sampleStore(provider: ZhiyaoProvider(), method: .apiKey)
         key.trend = []
@@ -29,8 +51,14 @@ struct RenderPreviews {
         try render(OverviewView(store: empty, onSettings: {}, onProviderSwitch: {}), named: "overview-empty", scheme: .light, in: directory)
 
         full.authMethod = .password
+        full.refreshSeconds = 60
         try render(SettingsView(store: full), named: "settings-password", scheme: .light, in: directory)
         try render(SettingsView(store: full), named: "settings-dark", scheme: .dark, in: directory)
+        full.refreshSeconds = 7
+        try render(SettingsView(store: full, section: .refresh), named: "settings-refresh-custom", scheme: .light, in: directory)
+        try render(SettingsView(store: full, section: .refresh), named: "settings-refresh-custom-dark", scheme: .dark, in: directory)
+        try render(SettingsView(store: full, section: .menuBar), named: "settings-menu-bar", scheme: .light, in: directory)
+        full.refreshSeconds = 60
         full.loginStatus = "登录成功，数据已更新"
         try render(SettingsView(store: full), named: "settings-success", scheme: .light, in: directory)
         full.loginStatus = nil
@@ -43,7 +71,9 @@ struct RenderPreviews {
         store.providerID = provider.manifest.id
         store.siteAddress = provider.manifest.id == "cbc" ? "https://cbc.icu" : "https://zyapi.tuluo.top:8888"
         store.session = AuthSession(token: "preview", expiresAt: nil, method: method)
-        store.lastUpdated = Date(timeIntervalSince1970: 1_779_624_000)
+        store.lastUpdated = Date()
+        store.overviewUpdated = store.lastUpdated
+        store.recordsUpdated = store.lastUpdated
         store.overview = UsageOverview(
             availableBalance: Decimal(string: "42.16"), balance: Decimal(string: "46.20"),
             frozenBalance: Decimal(string: "0.15"), usedBalance: Decimal(string: "8.62"),
@@ -72,6 +102,10 @@ struct RenderPreviews {
                 durationMs: nil, timeToFirstTokenMs: nil, upstreamFirstEventMs: nil
             )
         ]
+        if provider.manifest.id == "cbc" {
+            store.recentRecords[0].groupID = "130"
+            store.recentRecords[0].groupMultiplier = Decimal(string: "0.23")
+        }
         store.trend = (0..<7).map { index in
             UsageBucket(
                 id: "day-\(index)", date: Date().addingTimeInterval(Double(index - 6) * 86_400),
@@ -88,10 +122,10 @@ struct RenderPreviews {
         return store
     }
 
-    private static func render<V: View>(_ view: V, named name: String, scheme: ColorScheme, in directory: URL) throws {
+    private static func render<V: View>(_ view: V, named name: String, scheme: ColorScheme, in directory: URL, width: CGFloat? = nil, height: CGFloat? = nil) throws {
         let size = name.hasPrefix("settings")
             ? NSSize(width: MonitorLayout.settingsWidth, height: MonitorLayout.settingsHeight)
-            : NSSize(width: MonitorLayout.panelWidth, height: MonitorLayout.panelHeight)
+            : NSSize(width: width ?? MonitorLayout.panelWidth, height: height ?? (name.hasPrefix("trend-") ? 230 : MonitorLayout.panelHeight))
         let hosting = NSHostingView(rootView: view.environment(\.colorScheme, scheme))
         hosting.frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)

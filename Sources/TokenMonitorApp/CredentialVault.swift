@@ -7,8 +7,8 @@ actor CredentialVault {
     private let credentialsURL: URL
     private let keyURL: URL
 
-    init(service: String) {
-        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    init(service: String, directory: URL? = nil) {
+        let directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("TokenMonitor", isDirectory: true)
         credentialsURL = directory.appendingPathComponent("credentials.bin")
         keyURL = directory.appendingPathComponent("credentials.key")
@@ -21,6 +21,7 @@ actor CredentialVault {
     }
 
     func saveLogin(sessionToken: String, sessionAccount: String, apiKey: String?, apiKeyAccount: String,
+                   username: String?, usernameAccount: String, password: String?, passwordAccount: String,
                    refreshToken: String?, refreshAccount: String) throws {
         var values = try load()
         values[sessionAccount] = sessionToken
@@ -30,6 +31,14 @@ actor CredentialVault {
             values[apiKeyAccount] = apiKey
         } else {
             values.removeValue(forKey: apiKeyAccount)
+        }
+        if let username, !username.isEmpty, let password, !password.isEmpty {
+            values[usernameAccount] = username
+            values[passwordAccount] = password
+            values.removeValue(forKey: apiKeyAccount)
+        } else {
+            values.removeValue(forKey: usernameAccount)
+            values.removeValue(forKey: passwordAccount)
         }
         try save(values)
     }
@@ -41,11 +50,14 @@ actor CredentialVault {
         try save(values)
     }
 
-    func delete(sessionAccount: String, apiKeyAccount: String, refreshAccount: String) {
+    func delete(sessionAccount: String, apiKeyAccount: String, usernameAccount: String, passwordAccount: String,
+                refreshAccount: String) {
         do {
             var values = try load()
             values.removeValue(forKey: sessionAccount)
             values.removeValue(forKey: apiKeyAccount)
+            values.removeValue(forKey: usernameAccount)
+            values.removeValue(forKey: passwordAccount)
             values.removeValue(forKey: refreshAccount)
             try save(values)
         } catch {

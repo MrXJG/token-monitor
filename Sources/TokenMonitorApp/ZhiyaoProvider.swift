@@ -6,9 +6,9 @@ struct ZhiyaoProvider: UsageProvider {
 
     var manifest: ProviderManifest {
         ProviderManifest(
-            id: baseURL.absoluteString == "https://zyapi.tuluo.top:8888" ? "zhiyao" : "zhiyao:\(baseURL.absoluteString)",
-            name: baseURL.host == "zyapi.tuluo.top" ? "知遥 API" : (baseURL.host ?? "中转站"),
-            capabilities: [.balance, .usageTrend, .requestDetails, .cacheUsage, .modelBreakdown],
+            id: ["zyapi.tuluo.top", "zhiyaoapi.top"].contains(baseURL.host?.lowercased() ?? "") ? "zhiyao" : "zhiyao:\(baseURL.absoluteString)",
+            name: ["zyapi.tuluo.top", "zhiyaoapi.top"].contains(baseURL.host?.lowercased() ?? "") ? "知遥 API" : (baseURL.host ?? "中转站"),
+            capabilities: [.balance, .usageTrend, .requestDetails, .cacheUsage, .modelBreakdown, .groupRates],
             supportedAuthMethods: [.password, .apiKey]
         )
     }
@@ -130,24 +130,41 @@ struct ZhiyaoProvider: UsageProvider {
                 reasoningTokens: 0, cost: item.costUsd,
                 status: status, errorMessage: item.errorMessage,
                 keyName: item.apiKeyName, relayMode: item.endpoint, reasoningEffort: item.reasoningEffort,
-                groupName: item.catalogGroup, isStream: item.isStream,
+                groupName: [item.catalogGroup, item.channelName].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "), isStream: item.isStream,
                 durationMs: item.latencyMs, timeToFirstTokenMs: nil, upstreamFirstEventMs: nil,
-                cacheReadIncludedInInput: false
+                cacheReadIncludedInInput: false,
+                groupID: item.channelId,
+                groupMultiplier: item.channelMultiplier ?? item.multiplier
             )
         }, total: response.total)
     }
 
+    func fetchGroupRates(session: AuthSession) async throws -> [GroupRate] {
+        let response: PublicGroupsResponse = try await request(path: "/public/groups", token: nil)
+        return response.items.flatMap { group in
+            group.channels.compactMap { channel in
+                guard let multiplier = channel.multiplier, multiplier >= 0 else { return nil }
+                return GroupRate(id: channel.channelId,
+                                 name: "\(group.displayName) · \(channel.displayName)",
+                                 multiplier: multiplier)
+            }
+        }
+    }
+
+    private static let fractionalISO8601Style = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    private static let standardISO8601Style = Date.ISO8601FormatStyle()
+    private static let fallbackDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
     private static func date(_ value: String) -> Date? {
-        let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = iso.date(from: value) { return date }
-        iso.formatOptions = [.withInternetDateTime]
-        if let date = iso.date(from: value) { return date }
-        let day = DateFormatter()
-        day.locale = Locale(identifier: "en_US_POSIX")
-        day.timeZone = TimeZone(identifier: "Asia/Shanghai")
-        day.dateFormat = "yyyy-MM-dd"
-        return day.date(from: value)
+        if let date = try? fractionalISO8601Style.parse(value) { return date }
+        if let date = try? standardISO8601Style.parse(value) { return date }
+        return fallbackDateFormatter.date(from: value)
     }
 
     private func request<T: Decodable>(
@@ -171,6 +188,7 @@ struct ZhiyaoProvider: UsageProvider {
         }
         let (data, response) = try await self.session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw ProviderError.server("没有收到有效响应") }
+        if http.statusCode == 429 { throw ProviderError.rateLimited(retryAfter: http.retryAfterSeconds()) }
         if http.statusCode == 401 || http.statusCode == 403 { throw ProviderError.unauthenticated }
         guard (200..<300).contains(http.statusCode) else {
             let detail = (try? JSONDecoder().decode(ErrorResponse.self, from: data))?.detail
@@ -219,6 +237,9 @@ private struct SpendingItem: Decodable {
     let costUsd: Decimal
 }
 private struct UsageResponse: Decodable { let items: [ZhiyaoUsageItem]; let total: Int }
+private struct PublicGroupsResponse: Decodable { let items: [PublicGroup] }
+private struct PublicGroup: Decodable { let catalogGroup: String; let displayName: String; let channels: [PublicGroupChannel] }
+private struct PublicGroupChannel: Decodable { let channelId: String; let displayName: String; let multiplier: Decimal? }
 private struct ZhiyaoUsageItem: Decodable {
     let id: Int
     let requestTime: String
@@ -238,6 +259,10 @@ private struct ZhiyaoUsageItem: Decodable {
     let endpoint: String?
     let reasoningEffort: String?
     let catalogGroup: String?
+    let channelId: String?
+    let channelName: String?
+    let channelMultiplier: Decimal?
+    let multiplier: Decimal?
     let isStream: Bool?
     let latencyMs: Int?
 

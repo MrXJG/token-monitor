@@ -15,7 +15,7 @@ enum TokenMonitorApp {
 }
 
 @MainActor
-final class TokenMonitorDelegate: NSObject, NSApplicationDelegate {
+final class TokenMonitorDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let store = MonitorStore()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let popover = NSPopover()
@@ -23,12 +23,15 @@ final class TokenMonitorDelegate: NSObject, NSApplicationDelegate {
     private var observation: AnyCancellable?
     private var menuTrackingObserver: NSObjectProtocol?
     private var shouldClosePopoverAfterMenu = false
+    private var powerObserver: NSObjectProtocol?
+    private var workspaceObservers: [NSObjectProtocol] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
         configureMainMenu()
         configureStatusItem()
         popover.behavior = .transient
+        popover.delegate = self
         popover.contentSize = NSSize(width: MonitorLayout.panelWidth, height: MonitorLayout.panelHeight)
         popover.contentViewController = NSHostingController(rootView: OverviewView(
             store: store,
@@ -49,8 +52,23 @@ final class TokenMonitorDelegate: NSObject, NSApplicationDelegate {
                 self?.closePopoverAfterMenuTracking()
             }
         }
-        observation = store.objectWillChange.sink { [weak self] in
+        observation = store.objectWillChange.debounce(for: .milliseconds(20), scheduler: RunLoop.main).sink { [weak self] in
             Task { @MainActor in self?.updateStatusTitle() }
+        }
+        powerObserver = NotificationCenter.default.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.store.updatePowerState(lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled, sleeping: false)
+            }
+        }
+        workspaceObservers = [NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification].map { name in
+            NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                let sleeping = notification.name == NSWorkspace.willSleepNotification
+                Task { @MainActor in
+                    self?.store.updatePowerState(lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled, sleeping: sleeping)
+                }
+            }
         }
         updateStatusTitle()
         if ProcessInfo.processInfo.arguments.contains("--show-settings") {
@@ -59,6 +77,9 @@ final class TokenMonitorDelegate: NSObject, NSApplicationDelegate {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
+
+    func popoverDidShow(_ notification: Notification) { store.setPanelVisible(true) }
+    func popoverDidClose(_ notification: Notification) { store.setPanelVisible(false) }
 
     private func configureMainMenu() {
         let mainMenu = NSMenu()
@@ -111,11 +132,11 @@ final class TokenMonitorDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(withTitle: "刷新", action: #selector(refresh), keyEquivalent: "r").target = self
         let providers = NSMenu(title: "切换站点")
-        for definition in ProviderCatalog.all {
-            let item = providers.addItem(withTitle: definition.name, action: #selector(switchProvider(_:)), keyEquivalent: "")
+        for profile in store.siteProfiles {
+            let item = providers.addItem(withTitle: profile.alias, action: #selector(switchProvider(_:)), keyEquivalent: "")
             item.target = self
-            item.representedObject = definition.id
-            item.state = store.providerID == definition.id ? .on : .off
+            item.representedObject = profile
+            item.state = store.providerID == profile.providerID && store.siteAddress == profile.address ? .on : .off
         }
         let providerItem = NSMenuItem(title: "切换站点", action: nil, keyEquivalent: "")
         providerItem.submenu = providers
@@ -128,8 +149,8 @@ final class TokenMonitorDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func refresh() { Task { await store.refresh() } }
     @objc private func switchProvider(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
-        store.updateProviderID(id)
+        guard let profile = sender.representedObject as? SiteProfile else { return }
+        store.selectSiteProfile(profile)
     }
     @objc private func showSettingsAction() { showSettings() }
     @objc private func quit() { NSApplication.shared.terminate(nil) }
@@ -179,32 +200,37 @@ final class TokenMonitorDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusTitle() {
+        let size = NSSize(width: MonitorLayout.panelWidth, height: store.panelHeight)
+        if popover.contentSize != size { popover.contentSize = size }
         guard let button = statusItem.button else { return }
-        button.toolTip = "TokenMonitor · \(store.provider.manifest.name)"
+        let tooltip = "TokenMonitor · \(store.displaySiteAlias)"
+        if button.toolTip != tooltip { button.toolTip = tooltip }
         guard let overview = store.overview else {
-            button.title = "Token"
+            if button.title != "Token" { button.title = "Token" }
             return
         }
         let hasUsage = store.activeCapabilities.contains(.requestDetails)
+        let title: String
         switch store.menuBarDisplay {
         case .balance:
-            button.title = overview.availableBalance.map { "$\($0.formatted(.number.precision(.fractionLength(2))))" } ?? "余额 -"
+            title = overview.availableBalance.map { "$\($0.formatted(.number.precision(.fractionLength(2))))" } ?? "余额 -"
         case .summary:
             let balance = overview.availableBalance.map { "$\($0.formatted(.number.precision(.fractionLength(2))))" } ?? "余额 -"
-            button.title = hasUsage ? "\(balance) · \(compactTokens(overview.calculatedTokens))" : balance
+            title = hasUsage ? "\(balance) · \(compactTokens(overview.calculatedTokens))" : balance
         case .todayTokens:
-            button.title = hasUsage ? "\(compactTokens(overview.calculatedTokens)) Token" : "Token -"
+            title = hasUsage ? "\(compactTokens(overview.calculatedTokens)) Token" : "Token -"
         case .inputTokens:
-            button.title = hasUsage ? "I \(compactTokens(overview.inputTokens))" : "I -"
+            title = hasUsage ? "I \(compactTokens(overview.inputTokens))" : "I -"
         case .outputTokens:
-            button.title = hasUsage ? "O \(compactTokens(overview.outputTokens))" : "O -"
+            title = hasUsage ? "O \(compactTokens(overview.outputTokens))" : "O -"
         case .cacheHitRate:
-            button.title = hasUsage ? (overview.cacheHitRate.map { "缓存 \(Int($0 * 100))%" } ?? "缓存 -") : "缓存 -"
+            title = hasUsage ? (overview.cacheHitRate.map { "缓存 \(Int($0 * 100))%" } ?? "缓存 -") : "缓存 -"
         case .requests:
-            button.title = hasUsage ? "\(overview.todayRequests) 次" : "请求 -"
+            title = hasUsage ? "\(overview.todayRequests) 次" : "请求 -"
         case .todayCost:
-            button.title = overview.todayCost.map { "今日 $\($0.formatted(.number.precision(.fractionLength(2))))" } ?? "今日费用 -"
+            title = overview.todayCost.map { "今日 $\($0.formatted(.number.precision(.fractionLength(2))))" } ?? "今日费用 -"
         }
+        if button.title != title { button.title = title }
     }
 
     private func compactTokens(_ count: Int) -> String {

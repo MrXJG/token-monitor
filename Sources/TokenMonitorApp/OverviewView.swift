@@ -1,6 +1,9 @@
 import AppKit
 import Foundation
 import SwiftUI
+import Charts
+
+private typealias ViewState<Value> = SwiftUI.State<Value>
 
 struct MetricTile: View {
     let title: String
@@ -25,7 +28,7 @@ struct MetricTile: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(minHeight: 64, alignment: .topLeading)
+        .frame(minHeight: 54, alignment: .topLeading)
     }
 }
 
@@ -33,6 +36,7 @@ struct OverviewView: View {
     @ObservedObject var store: MonitorStore
     let onSettings: () -> Void
     let onProviderSwitch: () -> Void
+    @ViewState private var showsRateDetails = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,24 +58,47 @@ struct OverviewView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: MonitorLayout.sectionGap) {
-                    if let error = store.lastError {
-                        Label(store.overview == nil ? error : "更新失败，显示上次数据：\(error)", systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(10)
-                            .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
-                    }
-                    if let data = store.overview {
-                        if store.selectedTab == 0 || !store.activeCapabilities.contains(.requestDetails) {
-                            overviewGrid(data)
-                            if store.activeCapabilities.contains(.usageTrend), !store.trend.isEmpty {
-                                TrendStripView(buckets: store.trend)
-                            }
-                            if store.activeCapabilities.contains(.modelBreakdown) { modelSection }
-                        } else {
-                            recentSection
+                    if store.hasUnreadRateChange, let change = store.rateChanges.first {
+                        VStack(alignment: .leading, spacing: 7) {
+                            Label("分组倍率已变化", systemImage: "bell.badge")
+                                .font(.caption.weight(.semibold))
+                            Text(change.summary).font(.caption.monospacedDigit())
+                            HStack {
+                                Button("查看变化") { showsRateDetails = true }
+                                Button("知道了") { store.acknowledgeRateChanges() }
+                            }.font(.caption)
                         }
+                        .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(MonitorPalette.warningSurface, in: RoundedRectangle(cornerRadius: 6))
+                    }
+                    if let error = store.lastError {
+                        VStack(alignment: .leading, spacing: 7) {
+                            Label(error, systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.primary)
+                            if let hint = store.recoveryHint { Text(hint).foregroundStyle(.secondary) }
+                            HStack {
+                                Button("重试") { Task { await store.refresh() } }
+                                    .disabled(store.isRefreshing || store.isLoadingMoreRecords || store.session == nil)
+                                Button("连接设置", action: onSettings)
+                            }
+                        }
+                        .font(.caption)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(MonitorPalette.warningSurface, in: RoundedRectangle(cornerRadius: 6))
+                    }
+                    if store.selectedTab == 1, store.activeCapabilities.contains(.requestDetails) {
+                        RequestRecordsView(store: store)
+                    } else if let data = store.overview {
+                        overviewGrid(data)
+                        if store.activeCapabilities.contains(.usageTrend), !store.trend.isEmpty {
+                            if let error = store.trendError {
+                                Label("趋势未更新：\(error)", systemImage: "exclamationmark.triangle")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            TrendStripView(buckets: store.trend)
+                        }
+                        if store.activeCapabilities.contains(.modelBreakdown) { modelSection }
                     } else if store.isRefreshing {
                         VStack(spacing: 12) {
                             ProgressView()
@@ -96,29 +123,68 @@ struct OverviewView: View {
                 .padding(.vertical, 16)
             }
         }
-        .frame(width: MonitorLayout.panelWidth, height: MonitorLayout.panelHeight)
+        .frame(width: MonitorLayout.panelWidth, height: store.panelHeight)
         .background(MonitorMaterial(material: .popover))
+        .onChange(of: store.provider.manifest.id) { _, _ in showsRateDetails = false }
     }
 
     private var header: some View {
         HStack(alignment: .center, spacing: 8) {
-            HStack(spacing: 8) {
-                Text(store.provider.manifest.name)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                Text(store.displaySiteAlias)
                     .font(.headline)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .accessibilityLabel("当前站点：\(store.provider.manifest.name)")
+                    .accessibilityLabel("当前站点：\(store.displaySiteAlias)")
+                if store.activeCapabilities.contains(.groupRates) {
+                    Button { showsRateDetails.toggle() } label: {
+                        HStack(spacing: 3) {
+                            if let group = store.currentGroupRate {
+                                Text(group.name).lineLimit(1).truncationMode(.middle)
+                                Text((group.peakDescription == nil ? "" : "基础 ") + group.displayMultiplier).fixedSize()
+                            } else if let latest = store.recentRecords.first, let name = latest.groupName {
+                                Text(name).lineLimit(1).truncationMode(.middle)
+                                if let multiplier = latest.groupMultiplier {
+                                    Text(GroupRate.format(multiplier)).fixedSize()
+                                }
+                            } else {
+                                Text(store.groupRatesError != nil ? "倍率未更新" : (store.groupRates.isEmpty ? (store.isRefreshing ? "读取倍率…" : "暂无倍率") : "\(store.groupRates.count) 个分组"))
+                            }
+                            if store.hasUnreadRateChange { Image(systemName: "bell.badge.fill") }
+                            if store.groupRatesError != nil { Image(systemName: "exclamationmark.triangle") }
+                            Image(systemName: "chevron.down").font(.system(size: 8))
+                        }.font(.caption.monospacedDigit())
+                        .foregroundStyle(store.hasUnreadRateChange || store.groupRatesError != nil ? Color.orange : Color.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("最近请求分组及当前倍率；点击查看全部分组倍率")
+                    .accessibilityLabel("查看分组倍率")
+                    .popover(isPresented: $showsRateDetails) { GroupRatesView(store: store) }
+                } else if let name = store.recentRecords.first?.groupName {
+                    HStack(spacing: 3) {
+                        Text(name).lineLimit(1).truncationMode(.middle)
+                        if let multiplier = store.recentRecords.first?.groupMultiplier {
+                            Text(GroupRate.format(multiplier)).monospacedDigit()
+                        }
+                    }
+                    .font(.caption)
+                    .help("最近请求分组及记录倍率；此站点尚未提供独立的当前倍率接口")
+                }
+                }
                 statusSummary
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 2) {
                 providerSwitcher
                 Button { Task { await store.refresh() } } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .frame(width: MonitorLayout.iconTarget, height: MonitorLayout.iconTarget)
+                    Group {
+                        if store.isRefreshing { ProgressView().controlSize(.small) }
+                        else { Image(systemName: "arrow.clockwise") }
+                    }.frame(width: MonitorLayout.iconTarget, height: MonitorLayout.iconTarget)
                 }
                 .buttonStyle(.plain)
-                .disabled(store.isRefreshing || store.session == nil)
+                .disabled(store.isRefreshing || store.isLoadingMoreRecords || store.session == nil)
                 .help("刷新当前站点")
                 .accessibilityLabel("刷新当前站点")
                 Button(action: onSettings) {
@@ -133,39 +199,48 @@ struct OverviewView: View {
     }
 
     private var statusSummary: some View {
-        HStack(spacing: 5) {
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(store.lastError != nil ? Color.orange : (store.session == nil ? Color.secondary : MonitorPalette.balance))
-                    .frame(width: 6, height: 6)
-                Text(connectionStatus)
+        Group {
+            if store.isPanelVisible {
+                TimelineView(PeriodicTimelineSchedule(from: .now, by: 1)) { (context: TimelineViewDefaultContext) in
+                    statusSummaryContent(date: context.date)
+                }
+            } else {
+                statusSummaryContent(date: .now)
             }
-            Text("·")
-                .foregroundStyle(.tertiary)
-            Text(store.lastUpdated.map { "更新于 \($0.formatted(date: .omitted, time: .shortened))" } ?? "尚未更新")
-                .lineLimit(1)
         }
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .fixedSize(horizontal: true, vertical: false)
-        .accessibilityElement(children: .combine)
+    }
+
+    private func statusSummaryContent(date: Date) -> some View {
+        HStack(spacing: 5) {
+            Text(connectionStatus)
+                .foregroundStyle(store.lastError == nil ? Color.secondary : Color.orange)
+            Text("·")
+            Text((store.selectedTab == 1 ? store.recordsUpdated : store.overviewUpdated).map {
+                "更新于 \($0.formatted(.dateTime.hour().minute().second()))"
+            } ?? "尚未更新")
+            if store.session != nil, let next = store.nextRefreshDate, !store.isRefreshing {
+                Text("· \(max(0, Int(ceil(next.timeIntervalSince(date))))) 秒后刷新")
+            }
+        }
+        .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+        .lineLimit(1)
     }
 
     private var connectionStatus: String {
-        store.isRefreshing ? "刷新中" : (store.lastError != nil ? (store.session == nil ? "连接异常" : "更新失败") : (store.session == nil ? "未连接" : "已连接"))
+        store.isRefreshing ? "刷新中" : (store.lastError != nil ? (store.session == nil ? "连接异常" : "部分未更新") : (store.session == nil ? "未连接" : "已连接"))
     }
 
     private var providerSwitcher: some View {
         Menu {
-            ForEach(ProviderCatalog.all, id: \.id) { definition in
+            ForEach(store.siteProfiles) { profile in
                 Button {
-                    store.updateProviderID(definition.id)
+                    store.selectSiteProfile(profile)
                     onProviderSwitch()
                 } label: {
                     HStack {
-                        Text(definition.name)
+                        Text(profile.alias)
                         Spacer(minLength: 18)
-                        if definition.id == store.providerID {
+                        if profile.providerID == store.providerID && profile.address == store.siteAddress {
                             Image(systemName: "checkmark")
                         }
                     }
@@ -232,7 +307,7 @@ struct OverviewView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Divider()
-            DisclosureGroup("账户累计") {
+            DisclosureGroup {
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 7) {
                     summaryRow("账户余额", formatMoney(data.balance))
                     if store.activeCapabilities.contains(.requestDetails) {
@@ -247,6 +322,13 @@ struct OverviewView: View {
                         summaryRow("平均响应", formatMilliseconds(data.averageResponseTimeMs))
                     }
                 }.padding(.top, 8)
+            } label: {
+                HStack {
+                    Text("账户累计")
+                    Spacer()
+                    Text("\(data.totalTokens.formatted()) Token")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
             }
             .font(.subheadline.weight(.semibold))
         }
@@ -293,75 +375,6 @@ struct OverviewView: View {
         }
     }
 
-    private var recentSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("最近请求").font(.subheadline.weight(.semibold))
-            if store.recentRecords.isEmpty {
-                Text("暂无请求记录").font(.caption).foregroundStyle(.secondary)
-            } else {
-                ForEach(store.recentRecords) { record in
-                    DisclosureGroup {
-                        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 5) {
-                            detailRow("时间", record.requestTime?.formatted(date: .abbreviated, time: .standard) ?? "-")
-                            detailRow("请求 ID", record.requestId ?? "-")
-                            detailRow("API Key", record.keyName ?? "-")
-                            detailRow("端点", record.relayMode ?? "-")
-                            detailRow("推理等级", record.reasoningEffort ?? "-")
-                            detailRow("分组", record.groupName ?? "-")
-                            detailRow("流式", record.isStream.map { $0 ? "是" : "否" } ?? "-")
-                            detailRow("缓存写入", record.cacheWriteTokens.map { $0.formatted() } ?? "站点未提供")
-                            detailRow("推理 Token", record.reasoningTokens.formatted())
-                            detailRow("首 Token", formatMilliseconds(record.timeToFirstTokenMs.map(Double.init)))
-                            detailRow("上游首事件", formatMilliseconds(record.upstreamFirstEventMs.map(Double.init)))
-                            detailRow("总耗时", formatMilliseconds(record.durationMs.map(Double.init)))
-                        }
-                        .font(.caption2)
-                        .padding(.vertical, 8)
-                        if let error = record.errorMessage {
-                            Text(error).font(.caption2).foregroundStyle(.red).textSelection(.enabled)
-                        }
-                    } label: {
-                        HStack(alignment: .top, spacing: 8) {
-                            Circle()
-                                .fill(record.status == "成功" ? MonitorPalette.balance : (record.status == "处理中" ? .orange : .red))
-                                .frame(width: 7, height: 7)
-                                .padding(.top, 5)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(record.modelName)
-                                    .font(.caption.weight(.medium))
-                                    .lineLimit(2)
-                                HStack(spacing: 5) {
-                                    Text(record.status)
-                                        .foregroundStyle(record.status == "成功" ? MonitorPalette.balance : (record.status == "处理中" ? .orange : .red))
-                                    Text("· 输入 \(record.inputTokens.formatted()) · 输出 \(record.outputTokens.formatted())")
-                                        .foregroundStyle(.secondary)
-                                }
-                                .font(.caption2.monospacedDigit())
-                                .fixedSize(horizontal: false, vertical: true)
-                                Text("\(record.requestTime?.formatted(date: .omitted, time: .shortened) ?? "-") · 缓存读取 \(record.cacheReadTokens.formatted())")
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Text(formatMoney(record.cost))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.vertical, 6)
-                    Divider()
-                }
-            }
-        }
-    }
-
-    private func detailRow(_ label: String, _ value: String) -> some View {
-        GridRow {
-            Text(label).foregroundStyle(.secondary)
-            Text(value).textSelection(.enabled)
-        }
-    }
-
     private func formatMoney(_ value: Decimal?) -> String {
         guard let value else { return "-" }
         return "$\(value.formatted(.number.precision(.fractionLength(4))))"
@@ -375,182 +388,122 @@ struct OverviewView: View {
 
 struct TrendStripView: View {
     let buckets: [UsageBucket]
-    private var showsCost: Bool { buckets.allSatisfy { $0.totalTokens == 0 && $0.cost != nil } }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(showsCost ? "近 \(buckets.count) 天费用" : "近 \(buckets.count) 天 Token 用量")
-                        .font(.subheadline.weight(.semibold))
-                    Text("移动鼠标查看每日用量")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Text(showsCost ? "费用" : "Token")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            TrendChartRepresentable(buckets: buckets, showsCost: showsCost)
-                .frame(height: 96)
-                .accessibilityLabel("近 \(buckets.count) 天\(showsCost ? "费用" : "Token 用量")趋势")
-            HStack {
-                ForEach(buckets) { bucket in
-                    Text(bucket.date.formatted(.dateTime.day()))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
-                }
-            }
-        }
-        .padding(.top, 2)
-    }
-}
-
-struct TrendChartRepresentable: NSViewRepresentable {
-    let buckets: [UsageBucket]
-    let showsCost: Bool
-
-    func makeNSView(context: Context) -> TrendChartNSView {
-        TrendChartNSView(buckets: buckets, showsCost: showsCost)
-    }
-
-    func updateNSView(_ nsView: TrendChartNSView, context: Context) {
-        nsView.buckets = buckets
-        nsView.showsCost = showsCost
-        nsView.needsDisplay = true
-    }
-}
-
-final class TrendChartNSView: NSView {
-    var buckets: [UsageBucket]
-    var showsCost: Bool
-    private var hoveredIndex: Int?
-    private var trackingArea: NSTrackingArea?
-
-    init(buckets: [UsageBucket], showsCost: Bool) {
+    @ViewState private var hoveredID: String?
+    @ViewState private var pinnedID: String?
+    @FocusState private var chartFocused: Bool
+    init(buckets: [UsageBucket], selectedID: String? = nil) {
         self.buckets = buckets
-        self.showsCost = showsCost
-        super.init(frame: .zero)
-        wantsLayer = true
-        updateTrackingArea()
+        _pinnedID = ViewState(initialValue: selectedID)
     }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override var isFlipped: Bool { true }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        updateTrackingArea()
-    }
-
-    private func updateTrackingArea() {
-        if let trackingArea { removeTrackingArea(trackingArea) }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow],
-            owner: self
-        )
-        addTrackingArea(area)
-        trackingArea = area
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        guard !buckets.isEmpty, bounds.width > 0 else { return }
-        let position = convert(event.locationInWindow, from: nil)
-        let step = bounds.width / CGFloat(max(buckets.count - 1, 1))
-        hoveredIndex = min(max(Int((position.x / step).rounded()), 0), buckets.count - 1)
-        needsDisplay = true
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        hoveredIndex = nil
-        needsDisplay = true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        guard !buckets.isEmpty else { return }
-        let chartRect = bounds.insetBy(dx: 2, dy: 7)
-        let maximum = max(buckets.map(amount).max() ?? 1, 1)
-        let step = chartRect.width / CGFloat(max(buckets.count - 1, 1))
-        let points = buckets.enumerated().map { index, bucket in
-            CGPoint(
-                x: chartRect.minX + step * CGFloat(index),
-                y: chartRect.maxY - (chartRect.height - 6) * CGFloat(amount(bucket) / maximum)
-            )
-        }
-
-        NSColor.controlAccentColor.setStroke()
-        let line = NSBezierPath()
-        for (index, point) in points.enumerated() {
-            if index == 0 { line.move(to: point) } else { line.line(to: point) }
-        }
-        line.lineWidth = 2
-        line.lineJoinStyle = .round
-        line.stroke()
-
-        for (index, point) in points.enumerated() {
-            let radius: CGFloat = hoveredIndex == index ? 4 : 2.5
-            (hoveredIndex == index ? NSColor.systemGreen : NSColor.controlAccentColor).setFill()
-            NSBezierPath(
-                ovalIn: NSRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2)
-            ).fill()
-        }
-
-        guard let hoveredIndex, buckets.indices.contains(hoveredIndex) else { return }
-        let point = points[hoveredIndex]
-        NSColor.controlAccentColor.withAlphaComponent(0.22).setStroke()
-        let guide = NSBezierPath()
-        guide.move(to: CGPoint(x: point.x, y: chartRect.minY))
-        guide.line(to: CGPoint(x: point.x, y: chartRect.maxY))
-        guide.lineWidth = 1
-        guide.stroke()
-
-        let bucket = buckets[hoveredIndex]
-        let lines = [
-            bucket.date.formatted(date: .abbreviated, time: .omitted),
-            valueText(bucket),
-            "\(bucket.requestCount) 次请求"
-        ]
-        let font = NSFont.systemFont(ofSize: 11)
-        let boldFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        let tooltipWidth: CGFloat = 132
-        let tooltipHeight: CGFloat = 51
-        let originX = min(max(point.x - tooltipWidth / 2, bounds.minX + 4), bounds.maxX - tooltipWidth - 4)
-        let origin = CGPoint(x: originX, y: chartRect.minY + 2)
-        NSColor.controlBackgroundColor.withAlphaComponent(0.94).setFill()
-        NSBezierPath(
-            roundedRect: NSRect(origin: origin, size: CGSize(width: tooltipWidth, height: tooltipHeight)),
-            xRadius: 7,
-            yRadius: 7
-        ).fill()
-        NSColor.separatorColor.setStroke()
-        NSBezierPath(
-            roundedRect: NSRect(origin: origin, size: CGSize(width: tooltipWidth, height: tooltipHeight)),
-            xRadius: 7,
-            yRadius: 7
-        ).stroke()
-        lines.enumerated().forEach { index, line in
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: index == 1 ? boldFont : font,
-                .foregroundColor: index == 2 ? NSColor.secondaryLabelColor : NSColor.labelColor
-            ]
-            line.draw(
-                at: CGPoint(x: origin.x + 8, y: origin.y + 6 + CGFloat(index * 15)),
-                withAttributes: attributes
-            )
-        }
-    }
-
+    private var showsCost: Bool { buckets.allSatisfy { $0.totalTokens == 0 && $0.cost != nil } }
+    private var selected: UsageBucket? { buckets.first { $0.id == (hoveredID ?? pinnedID) } }
     private func amount(_ bucket: UsageBucket) -> Double {
         showsCost ? NSDecimalNumber(decimal: bucket.cost ?? .zero).doubleValue : Double(bucket.totalTokens)
     }
-
-    private func valueText(_ bucket: UsageBucket) -> String {
-        if showsCost {
-            return "$\((bucket.cost ?? .zero).formatted(.number.precision(.fractionLength(4))))"
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(showsCost ? "近 \(buckets.count) 天费用" : "近 \(buckets.count) 天 Token 用量")
+                .font(.subheadline.weight(.semibold))
+            Text("悬停查看 · 点击固定 · 方向键切换日期")
+                .font(.caption2).foregroundStyle(.secondary)
+            Chart {
+                ForEach(buckets) { bucket in
+                    LineMark(x: .value("日期", bucket.date), y: .value(showsCost ? "费用" : "Token", amount(bucket)))
+                        .foregroundStyle(MonitorPalette.input)
+                    PointMark(x: .value("日期", bucket.date), y: .value("用量", amount(bucket)))
+                        .foregroundStyle(MonitorPalette.input)
+                }
+                if let selected {
+                    RuleMark(x: .value("选中日期", selected.date))
+                        .foregroundStyle(.secondary.opacity(0.5))
+                    PointMark(x: .value("日期", selected.date), y: .value("用量", amount(selected)))
+                        .foregroundStyle(MonitorPalette.balance).symbolSize(55)
+                }
+            }
+            .chartXScale(domain: (buckets.map(\.date).min() ?? .now).addingTimeInterval(-43_200)...(buckets.map(\.date).max() ?? .now).addingTimeInterval(43_200))
+            .chartYScale(domain: 0...max(1, (buckets.map(amount).max() ?? 1) * 1.12))
+            .chartYAxis {
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
+                    AxisGridLine().foregroundStyle(.secondary.opacity(0.28))
+                    AxisTick().foregroundStyle(.secondary.opacity(0.45))
+                    AxisValueLabel {
+                        if let amount = value.as(Double.self) {
+                            Text(formatAxisValue(amount))
+                                .monospacedDigit()
+                        }
+                    }
+                }
+            }
+            .chartXAxis {
+                AxisMarks(values: buckets.map(\.date)) { _ in
+                    AxisValueLabel(format: .dateTime.day())
+                }
+            }
+            .chartOverlay { proxy in
+                GeometryReader { geometry in
+                    Rectangle().fill(.clear).contentShape(Rectangle())
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let position): hoveredID = nearestID(position.x, proxy: proxy, geometry: geometry)
+                            case .ended: hoveredID = nil
+                            }
+                        }
+                        .onTapGesture { position in
+                            pinnedID = nearestID(position.x, proxy: proxy, geometry: geometry)
+                            chartFocused = true
+                        }
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if let selected { tooltip(selected).allowsHitTesting(false).padding(3) }
+            }
+            .frame(height: 150)
+            .focusable().focused($chartFocused)
+            .onMoveCommand { direction in
+                let current = buckets.firstIndex { $0.id == (pinnedID ?? hoveredID) } ?? buckets.count - 1
+                let offset = direction == .left ? -1 : (direction == .right ? 1 : 0)
+                guard !buckets.isEmpty else { return }
+                hoveredID = nil
+                pinnedID = buckets[min(max(current + offset, 0), buckets.count - 1)].id
+            }
+            .onExitCommand { pinnedID = nil; hoveredID = nil }
+            .accessibilityLabel("每日用量趋势，使用左右方向键选择日期")
         }
-        return "\(bucket.totalTokens.formatted()) Token"
+    }
+    private func nearestID(_ x: CGFloat, proxy: ChartProxy, geometry: GeometryProxy) -> String? {
+        guard let frame = proxy.plotFrame else { return nil }
+        let plot = geometry[frame]
+        guard let date: Date = proxy.value(atX: min(max(x - plot.minX, 0), plot.width)) else { return nil }
+        return buckets.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }?.id
+    }
+    private func tooltip(_ bucket: UsageBucket) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(bucket.date.formatted(.dateTime.month().day())).fontWeight(.semibold)
+            if !showsCost {
+                Text("\(bucket.totalTokens.formatted()) Token").fontWeight(.semibold)
+                Text("输入 \(bucket.inputTokens.formatted()) · 输出 \(bucket.outputTokens.formatted())")
+                Text("缓存读取 \(bucket.cacheReadTokens.formatted())")
+                if let write = bucket.cacheWriteTokens { Text("缓存写入 \(write.formatted())") }
+            }
+            Text("\(bucket.requestCount) 次 · \(bucket.cost.map { "$" + $0.formatted(.number.precision(.fractionLength(4))) } ?? "费用未提供")")
+        }
+        .font(.caption2.monospacedDigit())
+        .padding(9)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.separator))
+    }
+
+    private func formatAxisValue(_ value: Double) -> String {
+        guard !showsCost else {
+            return value.formatted(.number.precision(.fractionLength(0...2)))
+        }
+        guard value > 0 else { return "0" }
+        if value >= 100_000_000 {
+            return String(format: "%.1f亿", value / 100_000_000).replacingOccurrences(of: ".0亿", with: "亿")
+        }
+        if value >= 10_000 {
+            return String(format: "%.1f万", value / 10_000).replacingOccurrences(of: ".0万", with: "万")
+        }
+        return Int(value.rounded()).formatted()
     }
 }
