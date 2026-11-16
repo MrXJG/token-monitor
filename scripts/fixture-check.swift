@@ -89,6 +89,32 @@ enum FixtureCheck {
             throw CheckError.failed
         } catch ProviderError.invalidURL {
         }
+        FixtureProtocol.runokContract = true
+        let runok = CBCProvider(baseURL: try CBCProvider.endpoint(for: "https://runok.ai"),
+                                session: URLSession(configuration: configuration))
+        guard runok.manifest.supportedAuthMethods == [.password],
+              provider.manifest.supportedAuthMethods == [.apiKey, .password] else { throw CheckError.failed }
+        do {
+            _ = try await runok.authenticate(.apiKey, secret: "fixture-key", username: nil)
+            throw CheckError.failed
+        } catch ProviderError.unsupported {}
+        let runokOverview = try await runok.fetchOverview(session: session)
+        let runokTrend = try await runok.fetchTrend(session: session, days: 7)
+        guard runokOverview.availableBalance == Decimal(string: "55.60"),
+              runokOverview.frozenBalance == Decimal(string: "0.01"),
+              runokOverview.requestCount == 100,
+              runokOverview.totalTokens == 1_871_227,
+              runokOverview.cost == Decimal(string: "2.50"),
+              runokOverview.todayCost == Decimal(string: "0.098"),
+              runokOverview.todayRequests == 15,
+              runokOverview.apiKeyCount == 2, runokTrend.count == 7 else { throw CheckError.failed }
+        FixtureProtocol.walletUnauthorized = true
+        do {
+            _ = try await runok.fetchOverview(session: session)
+            throw CheckError.failed
+        } catch ProviderError.unauthenticated {}
+        FixtureProtocol.walletUnauthorized = false
+        FixtureProtocol.runokContract = false
         FixtureProtocol.overview = Data("""
         {"code":401,"msg":"认证失败"}
         """.utf8)
@@ -192,12 +218,21 @@ private final class FixtureProtocol: URLProtocol {
     nonisolated(unsafe) static var zhiyaoKey = Data()
     nonisolated(unsafe) static var zhiyaoGroups = Data()
     nonisolated(unsafe) static var cbcContentType = "application/json"
+    nonisolated(unsafe) static var runokContract = false
+    nonisolated(unsafe) static var walletUnauthorized = false
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         let body: Data
-        if request.url?.path == "/user/login" {
+        if Self.runokContract, request.url?.host == "runok.ai", request.url?.path == "/prod-api/aigate/dashboard/user/overview" {
+            body = Data(#"{"code":200,"data":{"availableBalance":55.60,"balance":55.61,"todayRequests":15,"todayTokens":1871227,"totalTokens":1871227,"todayCost":0.11,"todayChargedAmount":0.098,"apiKeyCount":2}}"#.utf8)
+        } else if Self.runokContract, request.url?.path == "/prod-api/aigate/wallet/info" {
+            body = Data((Self.walletUnauthorized ? #"{"code":401,"msg":"认证失败"}"# : #"{"code":200,"data":{"availableBalance":55.60,"balance":55.61,"frozenBalance":0.01,"usedBalance":2.50,"requestCount":100}}"#).utf8)
+        } else if Self.runokContract, ["/prod-api/aigate/dashboard/user", "/prod-api/aigate/dashboard/user/trend"].contains(request.url!.path) {
+            let route = request.url!.path.replacingOccurrences(of: "/prod-api/", with: "")
+            body = Data("{\"code\":500,\"msg\":\"No static resource \(route) for request.\"}".utf8)
+        } else if request.url?.path == "/user/login" {
             body = Self.zhiyaoLogin
         } else if request.url?.path == "/user/me" {
             body = Self.zhiyaoUser

@@ -75,6 +75,13 @@ final class MonitorStore: ObservableObject {
     private func passwordAccount(for provider: any UsageProvider) -> String { "\(provider.manifest.id).password" }
     private func refreshAccount(for provider: any UsageProvider) -> String { "\(provider.manifest.id).refresh" }
 
+    private func savedAuthMethod(for provider: any UsageProvider) -> AuthMethod {
+        let supported = provider.manifest.supportedAuthMethods
+        if let saved = AuthMethod(rawValue: defaults.string(forKey: "authMethod.\(provider.manifest.id)") ?? ""),
+           supported.contains(saved) { return saved }
+        return supported[0]
+    }
+
     init(provider: (any UsageProvider)? = nil, loadSavedCredentials: Bool = true, defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.autoLoadSavedCredentials = loadSavedCredentials
@@ -116,8 +123,7 @@ final class MonitorStore: ObservableObject {
         self.siteAddress = selectedProvider == nil ? definition.defaultAddress : savedAddress
         self.siteAlias = Self.nonEmptyAlias(defaults.string(forKey: Self.siteAliasKey(providerID: definition.id, address: savedAddress)), fallback: definition.name)
         self.provider = provider ?? selectedProvider ?? CBCGatewayProvider()
-        self.authMethod = AuthMethod(rawValue: defaults.string(forKey: "authMethod.\(self.provider.manifest.id)") ?? "")
-            ?? self.provider.manifest.supportedAuthMethods.first ?? .apiKey
+        self.authMethod = savedAuthMethod(for: self.provider)
         let savedInterval = defaults.double(forKey: "refreshSeconds")
         if RefreshPolicy.isValid(savedInterval) { refreshSeconds = savedInterval }
         if let savedDisplay = defaults.string(forKey: "menuBarDisplay"),
@@ -203,8 +209,7 @@ final class MonitorStore: ObservableObject {
         session = nil
         selectedTab = 0
         clearSnapshot()
-        authMethod = AuthMethod(rawValue: defaults.string(forKey: "authMethod.\(candidate.manifest.id)") ?? "")
-            ?? candidate.manifest.supportedAuthMethods.first ?? .apiKey
+        authMethod = savedAuthMethod(for: candidate)
         username = ""; secret = ""; revealsSecret = false
         loginStatus = nil; lastError = nil
         defaults.set(definition.id, forKey: "providerID")
@@ -574,8 +579,7 @@ final class MonitorStore: ObservableObject {
 
     private func restoreSession(provider: any UsageProvider, revision: Int) async -> AuthSession? {
         do {
-            let savedMethod = AuthMethod(rawValue: defaults.string(forKey: "authMethod.\(provider.manifest.id)") ?? "")
-                ?? provider.manifest.supportedAuthMethods.first ?? .apiKey
+            let savedMethod = savedAuthMethod(for: provider)
             let newSession: AuthSession
             switch savedMethod {
             case .apiKey:
@@ -611,8 +615,7 @@ final class MonitorStore: ObservableObject {
             if let token = try await credentials.read(account: sessionAccount), !token.isEmpty {
                 let refreshToken = try await credentials.read(account: refreshAccount)
                 guard revision == refreshRevision else { return }
-                let method = AuthMethod(rawValue: defaults.string(forKey: "authMethod.\(provider.manifest.id)") ?? "")
-                    ?? provider.manifest.supportedAuthMethods.first ?? .apiKey
+                let method = savedAuthMethod(for: provider)
                 session = AuthSession(token: token, expiresAt: nil, method: method, refreshToken: refreshToken)
                 await refresh()
             } else if let apiKey = try await credentials.read(account: apiKeyAccount), !apiKey.isEmpty {

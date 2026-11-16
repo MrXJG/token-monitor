@@ -88,6 +88,9 @@ enum RefreshFixtureCheck {
         try check(try await credentialVault.read(account: "cbc-runok.password") == nil,
                   "logout removes password login credentials")
         let store = MonitorStore(loadSavedCredentials: false, defaults: defaults)
+        defaults.set("apiKey", forKey: "authMethod.cbc-runok")
+        try check(MonitorStore(loadSavedCredentials: false, defaults: defaults).authMethod == .password,
+                  "retired runok API Key preference switches to supported password login")
         let aliasSuite = "TokenMonitor.AliasFixture.\(UUID().uuidString)"
         let aliasDefaults = UserDefaults(suiteName: aliasSuite)!
         defer { aliasDefaults.removePersistentDomain(forName: aliasSuite) }

@@ -11,7 +11,7 @@ struct CBCProvider: UsageProvider {
             id: isRunOK ? "cbc-runok" : (baseURL.absoluteString == "https://cbc.icu/prod-api" ? "cbc" : "cbc:\(baseURL.absoluteString)"),
             name: isRunOK ? "柴哥 API" : (baseURL.host == "cbc.icu" ? "CBC 旧版" : (baseURL.host ?? "中转站")),
             capabilities: [.balance, .usageTrend, .requestDetails, .cacheUsage, .modelBreakdown, .groupRates],
-            supportedAuthMethods: [.apiKey, .password]
+            supportedAuthMethods: isRunOK ? [.password] : [.apiKey, .password]
         )
     }
 
@@ -57,6 +57,9 @@ struct CBCProvider: UsageProvider {
     }
 
     func authenticate(_ method: AuthMethod, secret: String, username: String?) async throws -> AuthSession {
+        guard manifest.supportedAuthMethods.contains(method) else {
+            throw ProviderError.unsupported("柴哥 API 已取消 API Key 登录，请使用账号密码登录")
+        }
         switch method {
         case .apiKey:
             guard !secret.isEmpty else { throw ProviderError.unauthenticated }
@@ -80,8 +83,26 @@ struct CBCProvider: UsageProvider {
     }
 
     func fetchOverview(session: AuthSession) async throws -> UsageOverview {
-        let payload: Envelope<OverviewPayload> = try await request(path: "/aigate/dashboard/user", token: session.token)
-        guard let value = payload.data else { throw ProviderError.decoding("概览数据为空") }
+        let value: OverviewPayload
+        if manifest.id == "cbc-runok" {
+            async let overview: Envelope<OverviewPayload> = request(path: "/aigate/dashboard/user/overview", token: session.token)
+            async let wallet: Envelope<WalletPayload> = request(path: "/aigate/wallet/info", token: session.token)
+            let (overviewPayload, walletPayload) = try await (overview, wallet)
+            guard var summary = overviewPayload.data, let balance = walletPayload.data else {
+                throw ProviderError.decoding("概览或钱包数据为空")
+            }
+            summary.availableBalance = balance.availableBalance
+            summary.balance = balance.balance
+            summary.frozenBalance = balance.frozenBalance
+            summary.usedBalance = balance.usedBalance
+            summary.requestCount = balance.requestCount
+            summary.totalChargedAmount = balance.usedBalance
+            value = summary
+        } else {
+            let payload: Envelope<OverviewPayload> = try await request(path: "/aigate/dashboard/user", token: session.token)
+            guard let summary = payload.data else { throw ProviderError.decoding("概览数据为空") }
+            value = summary
+        }
         return UsageOverview(
             availableBalance: value.availableBalance ?? value.balance,
             balance: value.balance,
@@ -97,7 +118,7 @@ struct CBCProvider: UsageProvider {
             cacheWriteTokens: value.cacheWriteTokens,
             reasoningTokens: value.reasoningOutputTokens ?? 0,
             cost: value.totalChargedAmount,
-            todayCost: nil,
+            todayCost: value.todayChargedAmount ?? value.todayCost,
             averageFirstTokenTimeMs: value.averageFirstTokenTime,
             averageResponseTimeMs: value.averageResponseTime,
             apiKeyCount: value.apiKeyCount ?? 0,
@@ -120,7 +141,8 @@ struct CBCProvider: UsageProvider {
                 guard let date = item.date else { return nil }
                 return UsageBucket(id: date.formatted(.iso8601), date: date, requestCount: item.requestCount ?? 0, inputTokens: item.promptTokens ?? 0, outputTokens: item.completionTokens ?? 0, totalTokens: item.totalTokens ?? ((item.promptTokens ?? 0) + (item.completionTokens ?? 0)), cacheReadTokens: item.cacheReadTokens ?? 0, cacheWriteTokens: item.cacheWriteTokens, cost: item.cost)
             }
-        } catch ProviderError.server(let message) where message.contains("请求地址不存在") || message.contains("HTTP 404") || message.contains("服务器返回错误 404") {
+        } catch ProviderError.server(let message) where message.contains("请求地址不存在") || message.contains("HTTP 404") || message.contains("服务器返回错误 404")
+            || message.contains("No static resource aigate/dashboard/user/trend") {
             return try await fetchTrendFromUsage(days: days, fetchPage: fetchPage)
         }
     }
@@ -250,6 +272,14 @@ private struct PagedEnvelope<T: Decodable>: Decodable { let rows: [T]?; let tota
 
 private struct OverviewPayload: Decodable {
     var apiKeyCount: Int?; var availableBalance: Decimal?; var balance: Decimal?; var frozenBalance: Decimal?; var usedBalance: Decimal?; var totalUncoveredAmount: Decimal?; var requestCount: Int?; var todayRequests: Int?; var totalTokens: Int?; var promptTokens: Int?; var completionTokens: Int?; var cacheReadTokens: Int?; var cacheWriteTokens: Int?; var reasoningOutputTokens: Int?; var totalChargedAmount: Decimal?; var averageFirstTokenTime: Double?; var averageResponseTime: Double?
+    var todayCost: Decimal?; var todayChargedAmount: Decimal?
+}
+private struct WalletPayload: Decodable {
+    let availableBalance: Decimal
+    let balance: Decimal
+    let frozenBalance: Decimal
+    let usedBalance: Decimal
+    let requestCount: Int
 }
 private struct TrendPayload: Decodable { var date: Date?; var requestCount: Int?; var totalTokens: Int?; var promptTokens: Int?; var completionTokens: Int?; var cacheReadTokens: Int?; var cacheWriteTokens: Int?; var cost: Decimal? }
 private struct UsagePayload: Decodable {
