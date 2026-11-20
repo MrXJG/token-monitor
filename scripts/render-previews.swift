@@ -102,6 +102,7 @@ struct RenderPreviews {
                 durationMs: nil, timeToFirstTokenMs: nil, upstreamFirstEventMs: nil
             )
         ]
+        store.todayRecords = store.recentRecords
         if provider.manifest.id == "cbc" {
             store.recentRecords[0].groupID = "130"
             store.recentRecords[0].groupMultiplier = Decimal(string: "0.23")

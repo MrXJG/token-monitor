@@ -1,6 +1,21 @@
 import Foundation
 
 enum UsageAggregator {
+    static func generationTokensPerSecond(records: [UsageRecord]) -> Double? {
+        var outputTokens = 0
+        var generationMilliseconds = 0
+        for record in records where record.status == "成功" {
+            guard record.outputTokens > 0, let durationMs = record.durationMs, durationMs > 0 else { continue }
+            let firstTokenMs = max(0, record.timeToFirstTokenMs ?? 0)
+            let elapsedMs = durationMs - firstTokenMs
+            guard elapsedMs > 0 else { continue }
+            outputTokens += record.outputTokens
+            generationMilliseconds += elapsedMs
+        }
+        guard outputTokens > 0, generationMilliseconds > 0 else { return nil }
+        return Double(outputTokens) * 1_000 / Double(generationMilliseconds)
+    }
+
     static func today(overview: UsageOverview, records: [UsageRecord]) -> (UsageOverview, [ModelUsage]) {
         var result = overview
         let successful = records.filter { $0.status == "成功" }

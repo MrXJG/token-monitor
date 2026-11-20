@@ -294,6 +294,7 @@ struct OverviewView: View {
                     MetricTile(title: "输出", value: data.outputTokens.formatted(), detail: nil, tint: MonitorPalette.output, symbol: "arrow.up.right")
                     MetricTile(title: "缓存读取", value: data.cacheReadTokens.formatted(), detail: hitRate, tint: MonitorPalette.cache, symbol: "tray.and.arrow.down")
                     MetricTile(title: "缓存写入", value: data.cacheWriteTokens.map { $0.formatted() } ?? "-", detail: data.cacheWriteTokens == nil ? "站点未提供" : nil, tint: .secondary, symbol: "tray.and.arrow.up")
+                    MetricTile(title: "生成速度", value: formatTokenRate(generationTokensPerSecond), detail: generationTokensPerSecond == nil ? "缺少有效耗时" : "输出 Token / 生成耗时", tint: MonitorPalette.output, symbol: "speedometer")
                 }
                 if data.reasoningTokens > 0 {
                     HStack {
@@ -383,6 +384,15 @@ struct OverviewView: View {
     private func formatMilliseconds(_ value: Double?) -> String {
         guard let value else { return "-" }
         return value >= 1000 ? String(format: "%.1fs", value / 1000) : "\(Int(value))ms"
+    }
+
+    private var generationTokensPerSecond: Double? {
+        UsageAggregator.generationTokensPerSecond(records: store.todayRecords)
+    }
+
+    private func formatTokenRate(_ value: Double?) -> String {
+        guard let value else { return "-" }
+        return "\(value.formatted(.number.precision(.fractionLength(0...1)))) Token/s"
     }
 }
 

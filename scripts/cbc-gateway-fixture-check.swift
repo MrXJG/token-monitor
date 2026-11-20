@@ -65,6 +65,7 @@ enum GatewayFixtureCheck {
               page.records[0].requestTime != nil, page.records[0].keyName == "sample",
               page.records[0].groupName == "sample-group",
               page.records[0].totalTokens == 250,
+              UsageAggregator.generationTokensPerSecond(records: page.records) == 220,
               today.inputTokens == 100, today.outputTokens == 110,
               today.cacheReadTokens == 20, today.cacheWriteTokens == 20,
               today.todayCost == Decimal(string: "0.125"),

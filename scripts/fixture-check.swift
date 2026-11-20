@@ -69,7 +69,8 @@ enum FixtureCheck {
               daily.outputTokens == 383,
               daily.cacheReadTokens == 27_392,
               daily.cacheWriteTokens == 12,
-              models.first?.totalTokens == 144_007 else {
+              models.first?.totalTokens == 144_007,
+              abs(UsageAggregator.generationTokensPerSecond(records: successful)! - (383.0 * 1_000 / 12_468)) < 0.001 else {
             throw CheckError.failed
         }
         FixtureProtocol.usage = Data("""
